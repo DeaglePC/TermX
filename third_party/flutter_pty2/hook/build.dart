@@ -17,6 +17,7 @@ void main(List<String> arguments) async {
         'src/windows/pty_windows_spawn.c',
         'src/windows/pty_windows_session.c',
       ],
+      OS.iOS => const ['src/ios/pty_ios_stub.c'],
       _ => const ['src/unix/pty_unix_spawn.c', 'src/unix/pty_unix_session.c'],
     };
 

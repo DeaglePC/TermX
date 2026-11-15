@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
@@ -27,11 +26,13 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(() => FlutterSecureStorage.setMockInitialValues({}));
 
-  const psHost = HostConfig(
-    id: 'local_ps',
-    name: '本地 PowerShell',
-    host: 'localhost',
-    authMethod: AuthMethod.localShell,
+  const devHost = HostConfig(
+    id: 'dev_debian',
+    name: 'DevBox',
+    host: '192.0.2.10',
+    username: 'admin',
+    authMethod: AuthMethod.demoSandbox,
+    detectedOs: RemoteOsType.debian,
   );
 
   const mixHost = HostConfig(
@@ -49,51 +50,51 @@ void main() {
       final workspace = TerminalWorkspace();
       addTearDown(workspace.dispose);
 
-      final psPane = workspace.open(psHost);
-      final psTab = workspace.activeTab!;
+      final devPane = workspace.open(devHost);
+      final devTab = workspace.activeTab!;
       final mixPane = workspace.open(mixHost);
       final mixTab = workspace.activeTab!;
 
       expect(workspace.tabs.length, 2);
 
-      // 1. 将 Mix 停靠到本地 PowerShell 右侧
+      // 1. 将 Mix 停靠到 DevBox 右侧
       final ok = workspace.dockTabIntoPane(
         sourceTab: mixTab,
-        targetTab: psTab,
-        targetPaneId: psPane.id,
+        targetTab: devTab,
+        targetPaneId: devPane.id,
         position: SplitDockPosition.right,
       );
       expect(ok, isTrue);
       expect(workspace.tabs.length, 1);
-      expect(psPane.disposed, isFalse);
+      expect(devPane.disposed, isFalse);
       expect(mixPane.disposed, isFalse);
-      expect(psTab.root, isA<PaneSplit>());
-      final splitRight = psTab.root as PaneSplit;
+      expect(devTab.root, isA<PaneSplit>());
+      final splitRight = devTab.root as PaneSplit;
       expect(splitRight.axis, Axis.horizontal);
-      expect(splitRight.paneIds, [psPane.id, mixPane.id]);
-      expect(workspace.title(psTab), '本地 PowerShell · Mix');
+      expect(splitRight.paneIds, [devPane.id, mixPane.id]);
+      expect(workspace.title(devTab), 'DevBox · Mix');
 
       // 2. 在同一分屏内把右侧的 Mix 拖到左侧
       final moved = workspace.movePaneToSplit(
-        sourceTab: psTab,
+        sourceTab: devTab,
         sourcePaneId: mixPane.id,
-        targetTab: psTab,
-        targetPaneId: psPane.id,
+        targetTab: devTab,
+        targetPaneId: devPane.id,
         position: SplitDockPosition.left,
       );
       expect(moved, isTrue);
-      expect(psTab.root.paneIds, [mixPane.id, psPane.id]);
-      expect(workspace.title(psTab), 'Mix · 本地 PowerShell');
-      expect(psPane.disposed, isFalse);
+      expect(devTab.root.paneIds, [mixPane.id, devPane.id]);
+      expect(workspace.title(devTab), 'Mix · DevBox');
+      expect(devPane.disposed, isFalse);
       expect(mixPane.disposed, isFalse);
 
       // 3. 将 Mix 窗格拆回顶部独立标签
-      final detached = workspace.detachPaneToNewTab(psTab, mixPane.id);
+      final detached = workspace.detachPaneToNewTab(devTab, mixPane.id);
       expect(detached, isNotNull);
       expect(workspace.tabs.length, 2);
-      expect(psTab.root.paneIds, [psPane.id]);
+      expect(devTab.root.paneIds, [devPane.id]);
       expect(detached!.root.paneIds, [mixPane.id]);
-      expect(psPane.disposed, isFalse);
+      expect(devPane.disposed, isFalse);
       expect(mixPane.disposed, isFalse);
     },
   );
@@ -104,7 +105,7 @@ void main() {
       await tester.binding.setSurfaceSize(const Size(1440, 900));
       addTearDown(() => tester.binding.setSurfaceSize(null));
 
-      final store = _InMemoryHostStore([mixHost]);
+      final store = _InMemoryHostStore([devHost, mixHost]);
       await tester.pumpWidget(
         MaterialApp(
           home: TermXWorkbench(
@@ -115,38 +116,24 @@ void main() {
       );
       await tester.pump(const Duration(milliseconds: 200));
 
-      // 打开第一个会话（本地 PowerShell 或 Mix）与第二个会话
-      if (Platform.isWindows) {
-        await tester.tap(
-          find.descendant(
-            of: find.byType(HostSidebarItem),
-            matching: find.text('本地 PowerShell'),
-          ),
-        );
-        await tester.pump(const Duration(milliseconds: 250));
-      }
+      // 打开第一个会话 [DevBox] 与第二个会话 [Mix]（等待沙盒 280ms 握手定时器完成）
+      await tester.tap(
+        find.descendant(
+          of: find.byType(HostSidebarItem),
+          matching: find.text('DevBox'),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 350));
+
       await tester.tap(
         find.descendant(
           of: find.byType(HostSidebarItem),
           matching: find.text('Mix'),
         ),
       );
-      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump(const Duration(milliseconds: 350));
 
-      if (!Platform.isWindows) {
-        // 非 Windows 环境下再开第二个 Mix 会话做双标签测试
-        await tester.tap(
-          find.descendant(
-            of: find.byType(HostSidebarItem),
-            matching: find.text('Mix'),
-          ),
-        );
-        await tester.pump(const Duration(milliseconds: 250));
-        await tester.pumpWidget(const SizedBox.shrink());
-        return;
-      }
-
-      // 此时有两个标签：[本地 PowerShell] 与 [Mix]，且当前激活的是 [Mix]
+      // 此时有两个标签：[DevBox] 与 [Mix]，且当前激活的是 [Mix]
       expect(
         find.byType(TerminalPaneView, skipOffstage: false),
         findsNWidgets(2),
@@ -157,7 +144,7 @@ void main() {
           )
           .toList();
 
-      // 场景 A：直接按住当前激活的 [Mix] 标签向下拖到终端窗口左半侧 -> 自动露出底层 本地 PowerShell 并向左分屏！
+      // 场景 A：直接按住当前激活的 [Mix] 标签向下拖到终端窗口左半侧 -> 自动露出底层 DevBox 并向左分屏！
       final mixTabFinder = find.descendant(
         of: find.byType(ReorderableListView),
         matching: find.text('Mix'),
@@ -203,16 +190,16 @@ void main() {
         of: mixPaneHeaderTitle,
         matching: find.byType(TerminalPaneView),
       );
-      final psPaneWidget = find.ancestor(
+      final devPaneWidget = find.ancestor(
         of: find.descendant(
           of: find.byType(TerminalPaneView),
-          matching: find.text('本地 PowerShell'),
+          matching: find.text('admin@192.0.2.10:22'),
         ),
         matching: find.byType(TerminalPaneView),
       );
       expect(
         tester.getRect(mixPaneWidget).left,
-        lessThan(tester.getRect(psPaneWidget).left),
+        lessThan(tester.getRect(devPaneWidget).left),
       );
 
       // 场景 B：把左侧 Mix 分屏窗格的标题栏向上拖回顶部标签栏 -> 拆回两个独立标签
@@ -238,12 +225,12 @@ void main() {
         findsNWidgets(2),
       );
 
-      // 场景 C：切回 [本地 PowerShell]，按住未激活的 [Mix] 标签向下拖到终端窗口右半侧 -> 向右分屏！
-      final psTabFinder = find.descendant(
+      // 场景 C：切回 [DevBox]，按住未激活的 [Mix] 标签向下拖到终端窗口右半侧 -> 向右分屏！
+      final devTabFinder = find.descendant(
         of: find.byType(ReorderableListView),
-        matching: find.text('本地 PowerShell'),
+        matching: find.text('DevBox'),
       );
-      await tester.tap(psTabFinder);
+      await tester.tap(devTabFinder);
       await tester.pump(const Duration(milliseconds: 100));
 
       final mixInactiveTab = find.descendant(
@@ -279,15 +266,15 @@ void main() {
         ),
         matching: find.byType(TerminalPaneView),
       );
-      final psAfterRight = find.ancestor(
+      final devAfterRight = find.ancestor(
         of: find.descendant(
           of: find.byType(TerminalPaneView),
-          matching: find.text('本地 PowerShell'),
+          matching: find.text('admin@192.0.2.10:22'),
         ),
         matching: find.byType(TerminalPaneView),
       );
       expect(
-        tester.getRect(psAfterRight).left,
+        tester.getRect(devAfterRight).left,
         lessThan(tester.getRect(mixAfterRight).left),
       );
       expect(tester.takeException(), isNull);
