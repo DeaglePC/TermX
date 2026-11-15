@@ -1,0 +1,3 @@
+@echo off
+echo [TermX] Starting Flutter application...
+flutter run %*
