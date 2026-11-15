@@ -117,11 +117,6 @@ FFI_PLUGIN_EXPORT void pty_session_begin_close(PtySession *session)
     (void)session;
 }
 
-FFI_PLUGIN_EXPORT void pty_session_release(PtySession *session)
-{
-    (void)session;
-}
-
 FFI_PLUGIN_EXPORT void pty_session_abandon(void *session)
 {
     (void)session;
