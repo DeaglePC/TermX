@@ -1,13 +1,17 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:xterm/xterm.dart';
 
 import '../core/models/host_config.dart';
 import '../core/models/host_store.dart';
 import '../core/models/remote_os.dart';
+import '../core/models/shortcut_settings.dart';
 import '../core/models/terminal_workspace.dart';
+import '../core/models/ui_preferences.dart';
 import '../core/platform/desktop_native_bridge.dart';
 import '../core/plugin_system/plugin_interface.dart';
 import '../core/plugin_system/plugin_manager.dart';
@@ -15,6 +19,8 @@ import '../core/ssh/ssh_session_controller.dart';
 import '../core/theme/adaptive_layout.dart';
 import '../core/theme/ui_tokens.dart';
 import '../core/vault/vault_service.dart';
+import '../plugins/command_beautifier/command_beautifier_plugin.dart';
+import '../plugins/command_beautifier/command_output_models.dart';
 import '../plugins/docker_inspector/docker_inspector_plugin.dart';
 import '../plugins/port_forward/port_forward_plugin.dart';
 import '../plugins/server_monitor/server_monitor_plugin.dart';
@@ -24,6 +30,7 @@ import 'mobile/mobile_accessory_keyboard.dart';
 import 'tablet/ipad_adaptive_controls.dart';
 import 'widgets/dialogs_and_sheets.dart';
 import 'widgets/os_logo_icon.dart';
+import 'widgets/shortcut_settings_dialog.dart';
 import 'widgets/terminal_pane_view.dart';
 import 'widgets/terminal_tab_button.dart';
 
@@ -31,11 +38,19 @@ class TermXWorkbench extends StatefulWidget {
   const TermXWorkbench({
     super.key,
     this.hostStore,
+    this.shortcutStore,
+    this.uiPreferencesStore,
     this.autoStartLocalShell = true,
+    this.restoreSavedWorkspace,
   });
 
   final HostStore? hostStore;
+  final ShortcutStore? shortcutStore;
+  final UiPreferencesStore? uiPreferencesStore;
   final bool autoStartLocalShell;
+
+  /// 是否在启动时自动恢复上次保存的工作区标签页与分屏树；默认跟随 [autoStartLocalShell]。
+  final bool? restoreSavedWorkspace;
 
   @override
   State<TermXWorkbench> createState() => _TermXWorkbenchState();
@@ -45,7 +60,13 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
     implements DesktopFileDropListener {
   final VaultService _vaultService = VaultService();
   final PluginManager _pluginManager = PluginManager();
+  final CommandBeautifierPlugin _beautifierPlugin = CommandBeautifierPlugin();
   late final HostStore _hostStore = widget.hostStore ?? HostStore();
+  late final ShortcutStore _shortcutStore =
+      widget.shortcutStore ?? ShortcutStore();
+  late final UiPreferencesStore _uiPrefsStore =
+      widget.uiPreferencesStore ?? UiPreferencesStore();
+  ShortcutConfig _shortcutConfig = ShortcutConfig.defaults();
   final GlobalKey _rightPanelBoundsKey = GlobalKey();
   bool _hostsLoaded = false;
 
@@ -100,7 +121,15 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
   // 界面状态与自适应参数
   FormFactorOverride _formFactorOverride = FormFactorOverride.auto;
   TermXColorPalette _colorPalette = TermXColorPalette.presets.first;
+  double _windowOpacity = 1.0;
+  TerminalCursorType _cursorType = TerminalCursorType.block;
   bool _leftSidebarCollapsed = false;
+  bool _bootstrapCompleted = false;
+  UiPreferences? _initialLoadedUiPrefs;
+  final ValueNotifier<double?> _rightPanelWidthNotifier =
+      ValueNotifier<double?>(null);
+  final VirtualModifierController _virtualModifierController =
+      VirtualModifierController();
   bool get _isSplitTerminal =>
       (_workspace.activeTab?.root.paneIds.length ?? 0) > 1;
   bool _ipadThumbPadsVisible = true;
@@ -111,8 +140,12 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
   @override
   void initState() {
     super.initState();
+    if (Platform.isAndroid || Platform.isIOS) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    }
     DesktopNativeBridge.instance.addDropListener(this);
     _workspace.addListener(_onWorkspaceChanged);
+    _pluginManager.addListener(_onPluginManagerLayoutChanged);
     _bootstrapCoreAndPlugins();
   }
 
@@ -168,22 +201,452 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
     }
   }
 
-  Future<void> _bootstrapCoreAndPlugins() async {
-    // 并行立即读取本地持久化的 SSH 服务器列表（含已记忆的系统类型与 Logo），无需等待本机 PTY 启动
-    unawaited(_loadSavedHosts());
+  Future<void> _loadSavedShortcuts() async {
+    try {
+      final loaded = await _shortcutStore.load();
+      if (!mounted) return;
+      setState(() => _shortcutConfig = loaded);
+    } catch (_) {}
+  }
 
-    // 注册四大官方核心插件到微内核 PluginManager
+  void _updateShortcutConfig(ShortcutConfig next) {
+    setState(() => _shortcutConfig = next);
+    unawaited(_shortcutStore.save(next).catchError((Object _) {}));
+  }
+
+  void _openShortcutSettings() {
+    showShortcutSettingsDialog(
+      context: context,
+      initialConfig: _shortcutConfig,
+      onChanged: _updateShortcutConfig,
+    );
+  }
+
+  Future<UiPreferences> _loadUiPreferences() async {
+    try {
+      final prefs = await _uiPrefsStore.load();
+      _initialLoadedUiPrefs = prefs;
+      if (!mounted) return prefs;
+      TermXColorPalette? matchedPalette;
+      if (prefs.colorPaletteName != null) {
+        for (final p in TermXColorPalette.presets) {
+          if (p.id == prefs.colorPaletteName ||
+              p.name == prefs.colorPaletteName) {
+            matchedPalette = p;
+            break;
+          }
+        }
+      }
+      _rightPanelWidthNotifier.value = prefs.rightPanelWidth;
+      setState(() {
+        _windowOpacity = prefs.windowOpacity;
+        _cursorType = prefs.cursorType;
+        _leftSidebarCollapsed = prefs.leftSidebarCollapsed;
+        _collapsedGroups
+          ..clear()
+          ..addAll(prefs.collapsedHostGroups);
+        _formFactorOverride = prefs.formFactorOverride;
+        if (matchedPalette != null) {
+          _colorPalette = matchedPalette;
+        }
+      });
+      if (_windowOpacity < 0.999 &&
+          DesktopNativeBridge.instance.supportsWindowOpacity) {
+        unawaited(DesktopNativeBridge.instance.setWindowOpacity(_windowOpacity));
+      }
+      return prefs;
+    } catch (_) {
+      return const UiPreferences();
+    }
+  }
+
+  void _onPluginManagerLayoutChanged() {
+    if (!_bootstrapCompleted || !mounted) return;
+    _persistUiPreferences();
+  }
+
+  void _persistUiPreferences() {
+    final bool rightPanelOpen;
+    final String? activeRightPluginId;
+    final List<String> enabledExtraPluginIds;
+    final List<String> disabledPluginIds;
+    final WorkspaceLayoutSnapshot? workspaceLayout;
+
+    if (_bootstrapCompleted) {
+      rightPanelOpen = _pluginManager.activePanelPlugin != null;
+      activeRightPluginId = _pluginManager.activePanelPluginId;
+      enabledExtraPluginIds = [
+        if (_pluginManager.allPlugins.any(
+              (p) => p.manifest.id == DockerInspectorPlugin.pluginId,
+            ) &&
+            _pluginManager.isPluginEnabled(DockerInspectorPlugin.pluginId))
+          DockerInspectorPlugin.pluginId,
+      ];
+      disabledPluginIds = _pluginManager.allPlugins
+          .map((p) => p.manifest.id)
+          .where((id) => !_pluginManager.isPluginEnabled(id))
+          .toList(growable: false);
+      workspaceLayout = _workspace.captureSnapshot();
+    } else {
+      final initial = _initialLoadedUiPrefs;
+      rightPanelOpen = initial?.rightPanelOpen ?? true;
+      activeRightPluginId = initial?.activeRightPluginId;
+      enabledExtraPluginIds = initial?.enabledExtraPluginIds ?? const [];
+      disabledPluginIds = initial?.disabledPluginIds ?? const [];
+      workspaceLayout = initial?.workspaceLayout;
+    }
+
+    final prefs = UiPreferences(
+      windowOpacity: _windowOpacity,
+      colorPaletteName: _colorPalette.id,
+      rightPanelWidth: _rightPanelWidthNotifier.value,
+      cursorType: _cursorType,
+      leftSidebarCollapsed: _leftSidebarCollapsed,
+      collapsedHostGroups: _collapsedGroups.toList(growable: false),
+      rightPanelOpen: rightPanelOpen,
+      activeRightPluginId: activeRightPluginId,
+      enabledExtraPluginIds: enabledExtraPluginIds,
+      disabledPluginIds: disabledPluginIds,
+      formFactorOverride: _formFactorOverride,
+      workspaceLayout: workspaceLayout,
+    );
+    unawaited(_uiPrefsStore.save(prefs).catchError((Object _) {}));
+  }
+
+  void _setCursorType(TerminalCursorType next) {
+    if (_cursorType == next) return;
+    setState(() => _cursorType = next);
+    _persistUiPreferences();
+  }
+
+  void _setWindowOpacity(double value, {bool persist = false}) {
+    final clamped = value.clamp(
+      UiPreferences.minOpacity,
+      UiPreferences.maxOpacity,
+    );
+    if ((clamped - _windowOpacity).abs() > 0.0005) {
+      setState(() => _windowOpacity = clamped);
+    }
+    unawaited(DesktopNativeBridge.instance.setWindowOpacity(clamped));
+    if (persist) {
+      _persistUiPreferences();
+    }
+  }
+
+  void _openWindowOpacityDialog() {
+    const presets = <(String label, double value)>[
+      ('100% 不透明', 1.0),
+      ('92% 微透', 0.92),
+      ('85% 舒适', 0.85),
+      ('75% 半透', 0.75),
+      ('60% 强透', 0.60),
+    ];
+
+    showDialog<void>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.12),
+      builder: (dialogCtx) => StatefulBuilder(
+        builder: (dialogCtx, setDialogState) {
+          final pct = (_windowOpacity * 100).round();
+          return Align(
+            alignment: Alignment.topRight,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 52, right: 16),
+              child: Material(
+                color: Colors.transparent,
+                child: Container(
+                  width: 344,
+                  padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+                  decoration: BoxDecoration(
+                    color: TxColors.bgSidebar,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: TxColors.borderStrong),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.42),
+                        blurRadius: 24,
+                        offset: const Offset(0, 10),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.opacity_rounded,
+                            size: 18,
+                            color: TxColors.accent,
+                          ),
+                          const SizedBox(width: 8),
+                          const Expanded(
+                            child: Text(
+                              '窗口透明度',
+                              style: TextStyle(
+                                fontSize: 14.5,
+                                fontWeight: FontWeight.w600,
+                                color: TxColors.textPrimary,
+                              ),
+                            ),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 9,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: TxColors.accent.withValues(alpha: 0.16),
+                              borderRadius: BorderRadius.circular(999),
+                              border: Border.all(
+                                color: TxColors.accent.withValues(alpha: 0.4),
+                              ),
+                            ),
+                            child: Text(
+                              '$pct%',
+                              style: const TextStyle(
+                                fontFamily: TxColors.monoFamily,
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w600,
+                                color: TxColors.accent,
+                              ),
+                            ),
+                          ),
+                          if (_windowOpacity < 0.995) ...[
+                            const SizedBox(width: 6),
+                            TextButton(
+                              style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 4,
+                                ),
+                                minimumSize: const Size(0, 28),
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
+                              onPressed: () {
+                                _setWindowOpacity(1.0, persist: true);
+                                setDialogState(() {});
+                              },
+                              child: const Text(
+                                '恢复 100%',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: TxColors.textSecondary,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      const Text(
+                        '拖动滑块实时调节窗口透视度，便于对照底层网页文档或监控画面。',
+                        style: TextStyle(
+                          fontSize: 12,
+                          height: 1.4,
+                          color: TxColors.textMuted,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      SliderTheme(
+                        data: SliderTheme.of(dialogCtx).copyWith(
+                          trackHeight: 4.5,
+                          activeTrackColor: TxColors.accent,
+                          inactiveTrackColor: TxColors.bgHover,
+                          thumbColor: TxColors.accent,
+                          overlayColor: TxColors.accent.withValues(alpha: 0.16),
+                          thumbShape: const RoundSliderThumbShape(
+                            enabledThumbRadius: 7.5,
+                          ),
+                        ),
+                        child: Slider(
+                          value: _windowOpacity.clamp(
+                            UiPreferences.minOpacity,
+                            UiPreferences.maxOpacity,
+                          ),
+                          min: UiPreferences.minOpacity,
+                          max: UiPreferences.maxOpacity,
+                          divisions: 65,
+                          onChanged: (v) {
+                            _setWindowOpacity(v);
+                            setDialogState(() {});
+                          },
+                          onChangeEnd: (v) {
+                            _setWindowOpacity(v, persist: true);
+                            setDialogState(() {});
+                          },
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final (label, val) in presets)
+                            _buildOpacityPresetChip(
+                              label: label,
+                              selected: (_windowOpacity - val).abs() < 0.015,
+                              onTap: () {
+                                _setWindowOpacity(val, persist: true);
+                                setDialogState(() {});
+                              },
+                            ),
+                        ],
+                      ),
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 12),
+                        child: Divider(height: 1, color: TxColors.borderSubtle),
+                      ),
+                      const Text(
+                        '终端光标样式',
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                          color: TxColors.textSecondary,
+                        ),
+                      ),
+                      const SizedBox(height: 7),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final (cLabel, cType)
+                              in const <(String, TerminalCursorType)>[
+                                ('反色方块 █', TerminalCursorType.block),
+                                ('纤细竖线 |', TerminalCursorType.verticalBar),
+                                ('底部下划线 _', TerminalCursorType.underline),
+                              ])
+                            _buildOpacityPresetChip(
+                              label: cLabel,
+                              selected: _cursorType == cType,
+                              onTap: () {
+                                _setCursorType(cType);
+                                setDialogState(() {});
+                              },
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildOpacityPresetChip({
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) => Material(
+    color: Colors.transparent,
+    child: InkWell(
+      borderRadius: BorderRadius.circular(6),
+      onTap: onTap,
+      child: Container(
+        height: 30,
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: selected
+              ? TxColors.accent.withValues(alpha: 0.18)
+              : TxColors.bgElevated,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: selected
+                ? TxColors.accent.withValues(alpha: 0.55)
+                : TxColors.borderSubtle,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+            color: selected ? TxColors.textPrimary : TxColors.textSecondary,
+          ),
+        ),
+      ),
+    ),
+  );
+
+  Future<void> _bootstrapCoreAndPlugins() async {
+    // 并行立即读取本地持久化的 SSH 服务器列表、快捷键配置、界面偏好与安全凭据策略，无需等待本机 PTY 启动
+    final hostsFuture = _loadSavedHosts();
+    unawaited(_loadSavedShortcuts());
+    final prefsFuture = _loadUiPreferences();
+    unawaited(_vaultService.loadPreferences());
+
+    // 注册官方核心插件到微内核 PluginManager
     await _pluginManager.registerPlugin(ServerMonitorPlugin());
     await _pluginManager.registerPlugin(SftpManagerPlugin());
+    await _pluginManager.registerPlugin(_beautifierPlugin);
     await _pluginManager.registerPlugin(SnippetsPlugin());
     await _pluginManager.registerPlugin(PortForwardPlugin());
 
-    // Windows 自动打开本地 PowerShell；其他平台等待用户添加主机。
-    if (mounted &&
+    await hostsFuture;
+    final prefs = await prefsFuture;
+    if (!mounted) return;
+
+    // 恢复上次已启用的社区扩展（如 Docker 容器插件）及停用状态
+    if (prefs.enabledExtraPluginIds.contains(DockerInspectorPlugin.pluginId) &&
+        !_pluginManager.allPlugins.any(
+          (p) => p.manifest.id == DockerInspectorPlugin.pluginId,
+        )) {
+      await _pluginManager.registerPlugin(DockerInspectorPlugin());
+      if (!mounted) return;
+    }
+    for (final disabledId in prefs.disabledPluginIds) {
+      _pluginManager.setPluginEnabled(disabledId, false);
+    }
+
+    // 恢复右侧辅助面板开关与上次选中的插件标签页
+    if (!prefs.rightPanelOpen) {
+      _pluginManager.setActivePanelPlugin(null);
+    } else if (prefs.activeRightPluginId != null &&
+        _pluginManager.isPluginEnabled(prefs.activeRightPluginId!)) {
+      _pluginManager.setActivePanelPlugin(prefs.activeRightPluginId!);
+    }
+
+    // 恢复上次打开的工作区标签页与递归分屏布局树
+    final shouldRestoreWorkspace =
+        widget.restoreSavedWorkspace ?? widget.autoStartLocalShell;
+    var restoredAnyTab = false;
+    if (shouldRestoreWorkspace &&
+        prefs.workspaceLayout != null &&
+        prefs.workspaceLayout!.tabs.isNotEmpty) {
+      final restoredPanes = _workspace.restoreFromSnapshot(
+        prefs.workspaceLayout!,
+        (hostId) => _hosts.where((h) => h.id == hostId).firstOrNull,
+      );
+      if (restoredPanes.isNotEmpty) {
+        restoredAnyTab = true;
+        for (final pane in restoredPanes) {
+          unawaited(_connectPane(pane));
+        }
+        _pluginManager.notifyActiveSessionChanged(
+          _workspace.activePane?.session,
+        );
+      }
+    }
+
+    // 若无历史工作区快照，Windows 默认自动打开本地 PowerShell；其他平台等待用户添加主机。
+    if (!restoredAnyTab &&
+        mounted &&
         widget.autoStartLocalShell &&
         _hosts.isNotEmpty &&
         _hosts.first.authMethod == AuthMethod.localShell) {
       await _openNewSession(_hosts.first);
+    }
+
+    if (!mounted) return;
+    _bootstrapCompleted = true;
+    if (restoredAnyTab || _workspace.tabs.isNotEmpty) {
+      _persistUiPreferences();
     }
   }
 
@@ -220,6 +683,7 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
     final host = await showAddHostDialog(
       context: context,
       onSave: _saveHost,
+      vaultService: _vaultService,
       initialGroup: initialGroup,
       existingGroups: _existingSshGroups,
     );
@@ -233,7 +697,13 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
     if (!_hostsLoaded) throw StateError('本地主机配置尚未成功读取，请稍后重试');
     final idx = _hosts.indexWhere((h) => h.id == updated.id);
     if (idx < 0) return;
+    final previousHost = _hosts[idx];
     await _vaultService.saveCredential(updated, secret);
+    if (previousHost.keychainAccountKey != updated.keychainAccountKey) {
+      try {
+        await _vaultService.deleteCredential(previousHost);
+      } catch (_) {}
+    }
     final updatedHosts = List<HostConfig>.of(_hosts);
     updatedHosts[idx] = updated;
     await _hostStore.save(updatedHosts);
@@ -263,15 +733,13 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
 
   Future<void> _editHost(HostConfig host) async {
     if (!_hostsLoaded || host.authMethod == AuthMethod.localShell) return;
-    HostSecretCredential? existingCred;
-    try {
-      existingCred = await _vaultService.readCredential(host);
-    } catch (_) {}
+    final hasSaved = await _vaultService.hasSavedCredential(host);
     if (!mounted) return;
     await showHostFormDialog(
       context: context,
       existingHost: host,
-      initialCredential: existingCred,
+      vaultService: _vaultService,
+      hasSavedCredential: hasSaved,
       onSave: _updateHost,
       onDelete: _deleteHost,
       existingGroups: _existingSshGroups,
@@ -353,6 +821,7 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
       _hosts[idx] = updated;
       _collapsedGroups.remove(nextGroup);
     });
+    _persistUiPreferences();
   }
 
   Future<void> _renameHostGroup(String oldGroup) async {
@@ -409,6 +878,7 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
         _collapsedGroups.add(chosen);
       }
     });
+    _persistUiPreferences();
   }
 
   Future<void> _showGroupContextMenu(String groupName, Offset globalPos) async {
@@ -514,6 +984,8 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
   Future<void> _connectPane(TerminalPane pane) async {
     final session = pane.session;
     final host = session.host;
+    session.inputModifierTransform =
+        _virtualModifierController.transformTerminalOutput;
 
     final knownHost = _hosts.where((h) => h.id == host.id).firstOrNull;
     if (knownHost?.detectedOs != null) {
@@ -523,6 +995,25 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
       );
     }
     session.addListener(() => _syncDetectedOsFromSession(session));
+    _pluginManager.notifySessionAttached(session);
+
+    final needConnectAuth =
+        host.authMethod != AuthMethod.localShell &&
+        host.authMethod != AuthMethod.demoSandbox &&
+        (host.requireBiometricUnlock || _vaultService.biometricLockEnabled);
+    if (needConnectAuth) {
+      final auth = await _vaultService.authenticateUser(
+        reason: '连接远程服务器 "${host.name}" (${host.username}@${host.host}) 前需验证系统身份',
+      );
+      if (pane.disposed) return;
+      if (!auth.isAuthenticated) {
+        final detail = auth.message.isEmpty ? '身份验证未通过或已取消' : auth.message;
+        session.terminal.write(
+          '\r\n\x1b[33m[TermX 安全中心]\x1b[0m $detail，已中止自动读取凭据连接。\r\n',
+        );
+        return;
+      }
+    }
 
     HostSecretCredential? credential;
     try {
@@ -588,6 +1079,9 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
   void _onWorkspaceChanged() {
     if (!mounted) return;
     setState(() {});
+    if (_bootstrapCompleted) {
+      _persistUiPreferences();
+    }
     final paneId = _workspace.activePane?.id;
     if (paneId == _lastFocusedPane) return;
     _lastFocusedPane = paneId;
@@ -852,47 +1346,146 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       backgroundColor: TxColors.bgSidebar,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
       ),
       builder: (ctx) => DraggableScrollableSheet(
         expand: false,
-        initialChildSize: 0.68,
-        minChildSize: 0.4,
-        maxChildSize: 0.92,
-        builder: (ctx, scrollController) => Column(
-          children: [
-            Container(
-              margin: const EdgeInsets.only(top: 8, bottom: 4),
-              width: 36,
-              height: 3.5,
-              decoration: BoxDecoration(
-                color: TxColors.borderStrong,
-                borderRadius: BorderRadius.circular(2),
+        initialChildSize: 0.72,
+        minChildSize: 0.42,
+        maxChildSize: 0.94,
+        builder: (ctx, scrollController) => SafeArea(
+          top: false,
+          child: Column(
+            children: [
+              Container(
+                margin: const EdgeInsets.only(top: 8, bottom: 4),
+                width: 36,
+                height: 3.5,
+                decoration: BoxDecoration(
+                  color: TxColors.borderStrong,
+                  borderRadius: BorderRadius.circular(2),
+                ),
               ),
-            ),
-            _buildPluginSelectorHeader(pluginContext, isCompactSheet: true),
-            Expanded(
-              child: ListenableBuilder(
-                listenable: _pluginManager,
-                builder: (ctx, _) {
-                  final current = _pluginManager.activePanelPlugin;
-                  if (current == null) {
-                    return const Center(child: Text('未选择插件'));
-                  }
-                  return current.buildPanelWidget(ctx, pluginContext) ??
-                      const SizedBox.shrink();
-                },
+              _buildPluginSelectorHeader(pluginContext, isCompactSheet: true),
+              Expanded(
+                child: ListenableBuilder(
+                  listenable: _pluginManager,
+                  builder: (ctx, _) {
+                    final current = _pluginManager.activePanelPlugin;
+                    if (current == null) {
+                      return const Center(child: Text('未选择插件'));
+                    }
+                    return Material(
+                      color: TxColors.bgSidebar,
+                      child:
+                          current.buildPanelWidget(ctx, pluginContext) ??
+                          const SizedBox.shrink(),
+                    );
+                  },
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
 
-  /// 处理 iPadOS Magic Keyboard / 桌面端全局快捷键与 CapsLock -> ESC 重映射
+  void _openMobilePaletteAndCursorSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      backgroundColor: TxColors.bgSidebar,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 36,
+                    height: 3.5,
+                    margin: const EdgeInsets.only(bottom: 12),
+                    decoration: BoxDecoration(
+                      color: TxColors.borderStrong,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                const Text(
+                  '终端配色主题',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: TxColors.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final p in TermXColorPalette.presets)
+                      _buildOpacityPresetChip(
+                        label: p.name,
+                        selected: _colorPalette.id == p.id,
+                        onTap: () {
+                          setState(() => _colorPalette = p);
+                          _persistUiPreferences();
+                          setSheetState(() {});
+                        },
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  '终端光标样式',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: TxColors.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final (cLabel, cType)
+                        in const <(String, TerminalCursorType)>[
+                          ('反色方块 █', TerminalCursorType.block),
+                          ('纤细竖线 |', TerminalCursorType.verticalBar),
+                          ('底部下划线 _', TerminalCursorType.underline),
+                        ])
+                      _buildOpacityPresetChip(
+                        label: cLabel,
+                        selected: _cursorType == cType,
+                        onTap: () {
+                          _setCursorType(cType);
+                          setSheetState(() {});
+                        },
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 处理 iPadOS Magic Keyboard / 桌面端全局可自定义快捷键与 CapsLock -> ESC 重映射
   KeyEventResult _handleGlobalKeyEvent(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
 
@@ -903,16 +1496,12 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
       return KeyEventResult.handled;
     }
 
-    final isCmdOrCtrl =
-        HardwareKeyboard.instance.isMetaPressed ||
-        HardwareKeyboard.instance.isControlPressed;
-    final isShift = HardwareKeyboard.instance.isShiftPressed;
+    final kb = HardwareKeyboard.instance;
+    final isCmdOrCtrl = kb.isMetaPressed || kb.isControlPressed;
+    final isShift = kb.isShiftPressed;
+    final isAlt = kb.isAltPressed;
 
-    if (event.logicalKey == LogicalKeyboardKey.f1) {
-      showIpadShortcutCheatSheet(context);
-      return KeyEventResult.handled;
-    }
-    if (HardwareKeyboard.instance.isAltPressed &&
+    if (isAlt &&
         [
           LogicalKeyboardKey.arrowLeft,
           LogicalKeyboardKey.arrowRight,
@@ -934,23 +1523,6 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
       return KeyEventResult.handled;
     }
 
-    if (isCmdOrCtrl && isShift && event.logicalKey == LogicalKeyboardKey.keyD) {
-      _splitPane(Axis.horizontal);
-      return KeyEventResult.handled;
-    }
-    if (isCmdOrCtrl && isShift && event.logicalKey == LogicalKeyboardKey.keyE) {
-      _splitPane(Axis.vertical);
-      return KeyEventResult.handled;
-    }
-    if (isCmdOrCtrl && isShift && event.logicalKey == LogicalKeyboardKey.keyT) {
-      _newLocalTab();
-      return KeyEventResult.handled;
-    }
-    if (isCmdOrCtrl && isShift && event.logicalKey == LogicalKeyboardKey.keyW) {
-      final tab = _workspace.activeTab;
-      if (tab != null) _workspace.closePane(tab, tab.focusedPaneId);
-      return KeyEventResult.handled;
-    }
     if (isCmdOrCtrl &&
         event.logicalKey == LogicalKeyboardKey.tab &&
         _workspace.tabs.isNotEmpty) {
@@ -959,21 +1531,51 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
       _workspace.activate(_workspace.tabs[index]);
       return KeyEventResult.handled;
     }
-    if (HardwareKeyboard.instance.isAltPressed &&
-        event.logicalKey == LogicalKeyboardKey.enter) {
-      final tab = _workspace.activeTab;
-      if (tab != null) _workspace.toggleMaximize(tab, tab.focusedPaneId);
-      return KeyEventResult.handled;
-    }
-    if (isCmdOrCtrl && isShift && event.logicalKey == LogicalKeyboardKey.keyM) {
-      _pluginManager.togglePanelPlugin(ServerMonitorPlugin.pluginId);
-      return KeyEventResult.handled;
-    }
-    if (isCmdOrCtrl &&
-        HardwareKeyboard.instance.isAltPressed &&
-        event.logicalKey == LogicalKeyboardKey.keyF) {
-      _pluginManager.togglePanelPlugin(SftpManagerPlugin.pluginId);
-      return KeyEventResult.handled;
+
+    final matched = _shortcutConfig.matchAction(
+      event,
+      isCmdOrCtrlPressed: isCmdOrCtrl,
+      isShiftPressed: isShift,
+      isAltPressed: isAlt,
+    );
+    switch (matched) {
+      case ShortcutAction.openShortcuts:
+        _openShortcutSettings();
+        return KeyEventResult.handled;
+      case ShortcutAction.splitRight:
+        _splitPane(Axis.horizontal);
+        return KeyEventResult.handled;
+      case ShortcutAction.splitDown:
+        _splitPane(Axis.vertical);
+        return KeyEventResult.handled;
+      case ShortcutAction.newTab:
+        _newLocalTab();
+        return KeyEventResult.handled;
+      case ShortcutAction.closePane:
+        final tab = _workspace.activeTab;
+        if (tab != null) _workspace.closePane(tab, tab.focusedPaneId);
+        return KeyEventResult.handled;
+      case ShortcutAction.maximizePane:
+        final tab = _workspace.activeTab;
+        if (tab != null) _workspace.toggleMaximize(tab, tab.focusedPaneId);
+        return KeyEventResult.handled;
+      case ShortcutAction.toggleBeauty:
+        if (_pluginManager.isPluginEnabled(CommandBeautifierPlugin.pluginId)) {
+          final session = _activeSession;
+          if (session == null ||
+              !_beautifierPlugin.toggleSessionDisplayMode(session.sessionId)) {
+            _pluginManager.togglePanelPlugin(CommandBeautifierPlugin.pluginId);
+          }
+          return KeyEventResult.handled;
+        }
+      case ShortcutAction.toggleMonitor:
+        _pluginManager.togglePanelPlugin(ServerMonitorPlugin.pluginId);
+        return KeyEventResult.handled;
+      case ShortcutAction.toggleSftp:
+        _pluginManager.togglePanelPlugin(SftpManagerPlugin.pluginId);
+        return KeyEventResult.handled;
+      default:
+        break;
     }
     return KeyEventResult.ignored;
   }
@@ -981,8 +1583,11 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
   @override
   void dispose() {
     DesktopNativeBridge.instance.removeDropListener(this);
+    _virtualModifierController.dispose();
+    _rightPanelWidthNotifier.dispose();
     _hostSearchCtrl.dispose();
     _workspace.removeListener(_onWorkspaceChanged);
+    _pluginManager.removeListener(_onPluginManagerLayoutChanged);
     _workspace.dispose();
     _pluginManager.dispose();
     _vaultService.dispose();
@@ -998,129 +1603,340 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
           _formFactorOverride,
         );
         final pluginContext = _buildPluginContext(layoutMode);
+        final keyboardOpen = MediaQuery.viewInsetsOf(context).bottom > 0;
+        final showBottomStatusBar =
+            !(layoutMode == AdaptiveLayoutMode.compact && keyboardOpen);
 
-        return Focus(
-          onKeyEvent: _handleGlobalKeyEvent,
-          child: Scaffold(
-            backgroundColor: _colorPalette.surfaceColor,
-            drawer: layoutMode == AdaptiveLayoutMode.compact
-                ? Drawer(
-                    backgroundColor: TxColors.bgSidebar,
-                    child: _buildHostSidebar(layoutMode),
-                  )
-                : null,
-            body: Column(
-              children: [
-                // 顶部工作台标题与会话标签栏
-                _buildTopHeaderBar(layoutMode, pluginContext),
+        return AnnotatedRegion<SystemUiOverlayStyle>(
+          value: const SystemUiOverlayStyle(
+            statusBarColor: Colors.transparent,
+            statusBarIconBrightness: Brightness.light,
+            statusBarBrightness: Brightness.dark,
+            systemNavigationBarColor: TxColors.bgChrome,
+            systemNavigationBarDividerColor: Colors.transparent,
+            systemNavigationBarIconBrightness: Brightness.light,
+            systemStatusBarContrastEnforced: false,
+            systemNavigationBarContrastEnforced: false,
+          ),
+          child: Focus(
+            onKeyEvent: _handleGlobalKeyEvent,
+            child: Scaffold(
+              backgroundColor: _colorPalette.surfaceColor,
+              drawer: layoutMode == AdaptiveLayoutMode.compact
+                  ? Drawer(
+                      width: (constraints.maxWidth * 0.84).clamp(260.0, 324.0),
+                      backgroundColor: TxColors.bgSidebar,
+                      child: SafeArea(child: _buildHostSidebar(layoutMode)),
+                    )
+                  : null,
+              body: Column(
+                children: [
+                  // 顶部工作台标题与会话标签栏（自适应刘海 / 挖孔与状态栏高度）
+                  _buildTopHeaderBar(layoutMode, pluginContext),
 
-                // 主工作区
-                Expanded(
-                  child: Row(
-                    children: [
-                      // 1. 左侧服务器会话树
-                      if (layoutMode == AdaptiveLayoutMode.expanded &&
-                          !_leftSidebarCollapsed)
-                        SizedBox(
-                          width: 236,
-                          child: _buildHostSidebar(layoutMode),
-                        )
-                      else if (layoutMode == AdaptiveLayoutMode.medium)
-                        _buildTabletNavigationRail(),
+                  // 主工作区（横屏时避开左右异形屏安全区）
+                  Expanded(
+                    child: SafeArea(
+                      top: false,
+                      bottom: false,
+                      child: Row(
+                        children: [
+                          // 1. 左侧服务器会话树
+                          if (layoutMode == AdaptiveLayoutMode.expanded &&
+                              !_leftSidebarCollapsed)
+                            SizedBox(
+                              width: 248,
+                              child: _buildHostSidebar(layoutMode),
+                            )
+                          else if (layoutMode == AdaptiveLayoutMode.medium)
+                            _buildTabletNavigationRail(),
 
-                      // 2. 中间核心终端区
-                      Expanded(
-                        child: _buildCenterTerminalArea(
-                          layoutMode,
-                          pluginContext,
-                        ),
-                      ),
-
-                      // 3. 右侧辅助检查器面板
-                      if (layoutMode != AdaptiveLayoutMode.compact)
-                        RepaintBoundary(
-                          child: ListenableBuilder(
-                            listenable: _pluginManager,
-                            builder: (context, _) {
-                              final activePlugin =
-                                  _pluginManager.activePanelPlugin;
-                              if (activePlugin == null) {
-                                return const SizedBox.shrink();
-                              }
-                              final panelWidth =
-                                  layoutMode == AdaptiveLayoutMode.expanded
-                                  ? 356.0
-                                  : 316.0;
-                              return Container(
-                                key: _rightPanelBoundsKey,
-                                width: panelWidth,
-                                decoration: const BoxDecoration(
-                                  color: TxColors.bgSidebar,
-                                  border: Border(
-                                    left: BorderSide(
-                                      color: TxColors.borderSubtle,
-                                    ),
-                                  ),
-                                ),
-                                child: Column(
-                                  children: [
-                                    _buildPluginSelectorHeader(pluginContext),
-                                    Expanded(
-                                      child:
-                                          activePlugin.buildPanelWidget(
-                                            context,
-                                            pluginContext,
-                                          ) ??
-                                          const SizedBox.shrink(),
-                                    ),
-                                  ],
-                                ),
-                              );
-                            },
+                          // 2. 中间核心终端区
+                          Expanded(
+                            child: _buildCenterTerminalArea(
+                              layoutMode,
+                              pluginContext,
+                            ),
                           ),
-                        ),
-                    ],
-                  ),
-                ),
 
-                // iPadOS 专属：妙控键盘 (Magic Keyboard) 胶囊条與 Stage Manager 控制栏
-                if (layoutMode == AdaptiveLayoutMode.medium ||
-                    _formFactorOverride == FormFactorOverride.ipad)
-                  IpadMagicKeyboardCapsuleBar(
-                    floatingThumbPadsVisible: _ipadThumbPadsVisible,
-                    onToggleThumbPads: (v) =>
-                        setState(() => _ipadThumbPadsVisible = v),
-                    capsLockRemappedToEsc: _capsLockRemappedToEsc,
-                    onToggleCapsLockRemap: (v) =>
-                        setState(() => _capsLockRemappedToEsc = v),
-                    onShowShortcutCheatSheet: () =>
-                        showIpadShortcutCheatSheet(context),
-                    onSplitTerminal: () => _splitPane(Axis.horizontal),
-                    isSplitTerminal: _isSplitTerminal,
-                  ),
-
-                // 手机端专属：双层可滑动虚拟扩展键盘栏 + 本地防抖草稿箱
-                if (layoutMode == AdaptiveLayoutMode.compact)
-                  MobileAccessoryKeyboardBar(
-                    onSendRaw: (seq) => _activeSession?.sendRawInput(seq),
-                    onOpenSftp: () => _openMobilePluginBottomSheet(
-                      SftpManagerPlugin.pluginId,
+                          // 3. 右侧辅助检查器面板
+                          if (layoutMode != AdaptiveLayoutMode.compact)
+                            RepaintBoundary(
+                              child: ListenableBuilder(
+                                listenable: _pluginManager,
+                                builder: (context, _) {
+                                  final activePlugin =
+                                      _pluginManager.activePanelPlugin;
+                                  if (activePlugin == null) {
+                                    return const SizedBox.shrink();
+                                  }
+                                  final defaultPanelWidth =
+                                      layoutMode == AdaptiveLayoutMode.expanded
+                                      ? (constraints.maxWidth >= 1320
+                                            ? 430.0
+                                            : 398.0)
+                                      : 346.0;
+                                  final leftOccupied =
+                                      layoutMode == AdaptiveLayoutMode.expanded
+                                      ? (_leftSidebarCollapsed ? 0.0 : 248.0)
+                                      : 58.0;
+                                  const minPanelWidth = 330.0;
+                                  final maxPanelWidth =
+                                      (constraints.maxWidth -
+                                              leftOccupied -
+                                              260.0)
+                                          .clamp(350.0, 920.0);
+                                  final panelContent = Column(
+                                    children: [
+                                      _buildPluginSelectorHeader(pluginContext),
+                                      Expanded(
+                                        child:
+                                            activePlugin.buildPanelWidget(
+                                              context,
+                                              pluginContext,
+                                            ) ??
+                                            const SizedBox.shrink(),
+                                      ),
+                                    ],
+                                  );
+                                  return ValueListenableBuilder<double?>(
+                                    valueListenable: _rightPanelWidthNotifier,
+                                    child: panelContent,
+                                    builder: (context, customWidth, panelChild) {
+                                      final panelWidth =
+                                          (customWidth ?? defaultPanelWidth)
+                                              .clamp(
+                                                minPanelWidth,
+                                                maxPanelWidth,
+                                              );
+                                      return Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          _RightPanelResizeHandle(
+                                            key: const ValueKey(
+                                              'right_panel_resize_handle',
+                                            ),
+                                            currentWidth: panelWidth,
+                                            minWidth: minPanelWidth,
+                                            maxWidth: maxPanelWidth,
+                                            onWidthChanged: (next) {
+                                              _rightPanelWidthNotifier.value =
+                                                  next;
+                                            },
+                                            onDragEnd: _persistUiPreferences,
+                                            onResetDefault: () {
+                                              _rightPanelWidthNotifier.value =
+                                                  null;
+                                              _persistUiPreferences();
+                                            },
+                                          ),
+                                          SizedBox(
+                                            key: _rightPanelBoundsKey,
+                                            width: panelWidth - 7,
+                                            child: Material(
+                                              color: TxColors.bgSidebar,
+                                              child: panelChild,
+                                            ),
+                                          ),
+                                        ],
+                                      );
+                                    },
+                                  );
+                                },
+                              ),
+                            ),
+                        ],
+                      ),
                     ),
-                    onOpenMonitor: () => _openMobilePluginBottomSheet(
-                      ServerMonitorPlugin.pluginId,
-                    ),
-                    onOpenSnippets: () =>
-                        _openMobilePluginBottomSheet(SnippetsPlugin.pluginId),
                   ),
 
-                // 底部状态栏
-                RepaintBoundary(
-                  child: _buildBottomPluginStatusBar(pluginContext),
-                ),
-              ],
+                  // iPadOS 专属：妙控键盘 (Magic Keyboard) 胶囊条與 Stage Manager 控制栏
+                  if (layoutMode == AdaptiveLayoutMode.medium ||
+                      _formFactorOverride == FormFactorOverride.ipad)
+                    IpadMagicKeyboardCapsuleBar(
+                      floatingThumbPadsVisible: _ipadThumbPadsVisible,
+                      onToggleThumbPads: (v) =>
+                          setState(() => _ipadThumbPadsVisible = v),
+                      capsLockRemappedToEsc: _capsLockRemappedToEsc,
+                      onToggleCapsLockRemap: (v) =>
+                          setState(() => _capsLockRemappedToEsc = v),
+                      onShowShortcutCheatSheet: _openShortcutSettings,
+                      onSplitTerminal: () => _splitPane(Axis.horizontal),
+                      isSplitTerminal: _isSplitTerminal,
+                    ),
+
+                  // 手机端专属：双层可滑动虚拟扩展键盘栏 + 本地防抖草稿箱
+                  if (layoutMode == AdaptiveLayoutMode.compact)
+                    ListenableBuilder(
+                      listenable: Listenable.merge([
+                        _beautifierPlugin,
+                        if (_activeSession != null) _activeSession!,
+                      ]),
+                      builder: (context, _) {
+                        final session = _activeSession;
+                        final sessionId = session?.sessionId;
+                        final cardCount = sessionId != null
+                            ? _beautifierPlugin.cardsForSession(sessionId).length
+                            : 0;
+                        final showingCard = sessionId != null &&
+                            _beautifierPlugin.hasOverlayForSession(sessionId) &&
+                            _beautifierPlugin.displayModeForSession(sessionId) ==
+                                CardDisplayMode.beautified;
+                        final isDisconnected =
+                            session != null &&
+                            (session.state ==
+                                    SessionConnectionState.disconnected ||
+                                session.state == SessionConnectionState.error);
+                        final activeTab = _workspace.activeTab;
+                        return MobileAccessoryKeyboardBar(
+                          includeBottomSafeArea: !showBottomStatusBar,
+                          modifierController: _virtualModifierController,
+                          onRequestTerminalFocus: () =>
+                              _workspace.activePane?.focus.requestFocus(),
+                          onReconnect: activeTab == null
+                              ? null
+                              : () => _restartPane(
+                                  activeTab,
+                                  activeTab.focusedPaneId,
+                                ),
+                          isDisconnected: isDisconnected,
+                          onSendRaw: (seq) => _activeSession?.sendRawInput(seq),
+                          onOpenSftp: () => _openMobilePluginBottomSheet(
+                            SftpManagerPlugin.pluginId,
+                          ),
+                          onOpenMonitor: () => _openMobilePluginBottomSheet(
+                            ServerMonitorPlugin.pluginId,
+                          ),
+                          onOpenBeautifier: () => _openMobilePluginBottomSheet(
+                            CommandBeautifierPlugin.pluginId,
+                          ),
+                          beautifierCardCount: cardCount,
+                          beautifierShowingCard: showingCard,
+                          onToggleBeautifierMode: sessionId == null
+                              ? null
+                              : () => _beautifierPlugin.toggleSessionDisplayMode(
+                                  sessionId,
+                                ),
+                          onOpenSnippets: () => _openMobilePluginBottomSheet(
+                            SnippetsPlugin.pluginId,
+                          ),
+                          onOpenPortForward: () => _openMobilePluginBottomSheet(
+                            PortForwardPlugin.pluginId,
+                          ),
+                        );
+                      },
+                    ),
+
+                  // 底部状态栏（手机端弹出软键盘时自动收起，日常完整避让手势小白条）
+                  if (showBottomStatusBar)
+                    RepaintBoundary(
+                      child: _buildBottomPluginStatusBar(
+                        pluginContext,
+                        layoutMode,
+                      ),
+                    ),
+                ],
+              ),
             ),
           ),
         );
+      },
+    );
+  }
+
+  Widget _topToolbarAction({
+    required String tooltip,
+    required IconData icon,
+    required VoidCallback onPressed,
+    String? label,
+    bool highlighted = false,
+  }) {
+    final fg = highlighted ? TxColors.accent : TxColors.iconDefault;
+    if (label != null && label.isNotEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 2),
+        child: Tooltip(
+          message: tooltip,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(6),
+            onTap: onPressed,
+            child: Container(
+              height: 32,
+              padding: const EdgeInsets.symmetric(horizontal: 9),
+              decoration: BoxDecoration(
+                color: highlighted
+                    ? TxColors.accent.withValues(alpha: 0.14)
+                    : TxColors.bgElevated.withValues(alpha: 0.55),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(
+                  color: highlighted
+                      ? TxColors.accent.withValues(alpha: 0.45)
+                      : TxColors.borderSubtle,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon, size: 17.5, color: fg),
+                  const SizedBox(width: 5),
+                  Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: highlighted
+                          ? FontWeight.w600
+                          : FontWeight.w500,
+                      color: highlighted
+                          ? TxColors.textPrimary
+                          : TxColors.textSecondary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 1.5),
+      child: SizedBox(
+        width: 34,
+        height: 32,
+        child: IconButton(
+          padding: EdgeInsets.zero,
+          tooltip: tooltip,
+          style: IconButton.styleFrom(
+            backgroundColor: highlighted
+                ? TxColors.accent.withValues(alpha: 0.14)
+                : Colors.transparent,
+            hoverColor: TxColors.bgHover,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(6),
+            ),
+          ),
+          icon: Icon(icon, size: 18.5, color: fg),
+          onPressed: onPressed,
+        ),
+      ),
+    );
+  }
+
+  void _openPluginManagerSheetOrDialog(PluginContext pluginContext) {
+    showPluginManagerDialog(
+      context: context,
+      pluginManager: _pluginManager,
+      onInstallSampleCommunityPlugin: () async {
+        if (_pluginManager.allPlugins.any(
+          (p) => p.manifest.id == DockerInspectorPlugin.pluginId,
+        )) {
+          pluginContext.showToast('Docker 容器扩展已处于启用状态');
+          return;
+        }
+        await _pluginManager.registerPlugin(DockerInspectorPlugin());
+        _pluginManager.setActivePanelPlugin(DockerInspectorPlugin.pluginId);
+        pluginContext.showToast('已启用扩展：Docker 容器');
       },
     );
   }
@@ -1129,10 +1945,23 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
     AdaptiveLayoutMode layoutMode,
     PluginContext pluginContext,
   ) {
+    final screenWidth = MediaQuery.sizeOf(context).width;
+    final mediaPadding = MediaQuery.paddingOf(context);
+    final isCompact = layoutMode == AdaptiveLayoutMode.compact;
+    final showDesktopLabels =
+        layoutMode == AdaptiveLayoutMode.expanded && screenWidth >= 1220;
+    final barHeight = isCompact ? 48.0 : 46.0;
+    final hPad = isCompact ? 8.0 : 10.0;
+
     return Container(
       key: _topBarBoundsKey,
-      height: 40,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
+      height: barHeight + mediaPadding.top,
+      padding: EdgeInsets.fromLTRB(
+        hPad + mediaPadding.left,
+        mediaPadding.top,
+        hPad + mediaPadding.right,
+        0,
+      ),
       decoration: BoxDecoration(
         color: TxColors.bgChrome,
         border: Border(
@@ -1145,244 +1974,358 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
       ),
       child: Row(
         children: [
-          if (layoutMode == AdaptiveLayoutMode.compact)
+          if (isCompact)
             Builder(
-              builder: (ctx) => IconButton(
-                visualDensity: VisualDensity.compact,
-                icon: const Icon(
-                  Icons.menu_rounded,
-                  size: 18,
-                  color: TxColors.iconDefault,
+              builder: (ctx) => SizedBox(
+                width: 38,
+                height: 38,
+                child: IconButton(
+                  tooltip: '服务器列表',
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(
+                    Icons.menu_rounded,
+                    size: 22,
+                    color: TxColors.iconDefault,
+                  ),
+                  onPressed: () => Scaffold.of(ctx).openDrawer(),
                 ),
-                onPressed: () => Scaffold.of(ctx).openDrawer(),
               ),
             )
           else if (layoutMode == AdaptiveLayoutMode.expanded)
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-              padding: EdgeInsets.zero,
+            _topToolbarAction(
               tooltip: '显示/隐藏服务器栏',
-              icon: Icon(
-                _leftSidebarCollapsed
-                    ? Icons.menu_open_rounded
-                    : Icons.view_sidebar_outlined,
-                size: 16.5,
-                color: _leftSidebarCollapsed
-                    ? TxColors.iconDefault
-                    : TxColors.textSecondary,
-              ),
-              onPressed: () => setState(
-                () => _leftSidebarCollapsed = !_leftSidebarCollapsed,
-              ),
+              icon: _leftSidebarCollapsed
+                  ? Icons.menu_open_rounded
+                  : Icons.view_sidebar_outlined,
+              highlighted: !_leftSidebarCollapsed,
+              onPressed: () {
+                setState(
+                  () => _leftSidebarCollapsed = !_leftSidebarCollapsed,
+                );
+                _persistUiPreferences();
+              },
             ),
 
           const SizedBox(width: 4),
 
-          // 克制的原生桌面端品牌标识（去除蓝紫荧光渐变）
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 21,
-                height: 21,
-                decoration: BoxDecoration(
-                  color: TxColors.bgElevated,
-                  borderRadius: BorderRadius.circular(5),
-                  border: Border.all(color: TxColors.borderDefault),
+          // 手机端在已有会话标签时自动隐藏品牌文字以腾出标签宽度；无标签或平板/PC 常驻显示
+          if (!isCompact || _workspace.tabs.isEmpty) ...[
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 24,
+                  height: 24,
+                  decoration: BoxDecoration(
+                    color: TxColors.bgElevated,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: TxColors.borderDefault),
+                  ),
+                  alignment: Alignment.center,
+                  child: const Icon(
+                    Icons.terminal_rounded,
+                    size: 15,
+                    color: TxColors.textPrimary,
+                  ),
                 ),
-                alignment: Alignment.center,
-                child: const Icon(
-                  Icons.terminal_rounded,
-                  size: 13,
-                  color: TxColors.textPrimary,
+                const SizedBox(width: 8),
+                const Text(
+                  'TermX',
+                  style: TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: -0.2,
+                    color: TxColors.textPrimary,
+                  ),
                 ),
-              ),
-              const SizedBox(width: 7),
-              const Text(
-                'TermX',
-                style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: -0.2,
-                  color: TxColors.textPrimary,
-                ),
-              ),
-            ],
-          ),
-          Container(
-            width: 1,
-            height: 14,
-            margin: const EdgeInsets.symmetric(horizontal: 10),
-            color: TxColors.borderSubtle,
-          ),
+              ],
+            ),
+            Container(
+              width: 1,
+              height: 18,
+              margin: EdgeInsets.symmetric(horizontal: isCompact ? 8 : 10),
+              color: TxColors.borderSubtle,
+            ),
+          ],
 
           Expanded(child: _buildSessionTabs()),
 
           const SizedBox(width: 4),
-          IconButton(
-            visualDensity: VisualDensity.compact,
-            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-            padding: EdgeInsets.zero,
-            tooltip: '新建本地终端    Ctrl+Shift+T',
-            icon: const Icon(
-              Icons.add_rounded,
-              size: 17,
-              color: TxColors.iconDefault,
-            ),
-            onPressed: _newLocalTab,
-          ),
-
-          Container(
-            width: 1,
-            height: 14,
-            margin: const EdgeInsets.symmetric(horizontal: 6),
-            color: TxColors.borderSubtle,
-          ),
-
-          // 布局视图切换（单色克制图标）
-          if (layoutMode != AdaptiveLayoutMode.compact)
-            PopupMenuButton<FormFactorOverride>(
-              tooltip: '布局视图 (${_formFactorOverride.label})',
-              initialValue: _formFactorOverride,
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(minWidth: 150),
-              icon: Icon(
-                Icons.devices_outlined,
-                size: 16,
-                color: _formFactorOverride == FormFactorOverride.auto
-                    ? TxColors.iconDefault
-                    : TxColors.accent,
+          if (isCompact) ...[
+            SizedBox(
+              width: 38,
+              height: 38,
+              child: IconButton(
+                tooltip: '新建连接',
+                padding: EdgeInsets.zero,
+                icon: const Icon(
+                  Icons.add_rounded,
+                  size: 22,
+                  color: TxColors.iconDefault,
+                ),
+                onPressed: _newLocalTab,
               ),
-              onSelected: (val) => setState(() => _formFactorOverride = val),
-              itemBuilder: (context) => FormFactorOverride.values
-                  .map(
-                    (f) => PopupMenuItem(
-                      value: f,
-                      height: 34,
-                      child: Row(
-                        children: [
-                          Icon(
-                            _formFactorOverride == f
-                                ? Icons.check_rounded
-                                : null,
-                            size: 14,
-                            color: TxColors.accent,
-                          ),
-                          const SizedBox(width: 8),
-                          Text(f.label, style: const TextStyle(fontSize: 12.5)),
-                        ],
-                      ),
-                    ),
-                  )
-                  .toList(),
             ),
-
-          // 终端配色切换
-          PopupMenuButton<TermXColorPalette>(
-            tooltip: '终端配色',
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 180),
-            icon: const Icon(
-              Icons.contrast_rounded,
-              size: 16,
-              color: TxColors.iconDefault,
-            ),
-            onSelected: (p) => setState(() => _colorPalette = p),
-            itemBuilder: (context) => TermXColorPalette.presets
-                .map(
-                  (p) => PopupMenuItem(
-                    value: p,
-                    height: 34,
+            SizedBox(
+              width: 38,
+              height: 38,
+              child: PopupMenuButton<String>(
+                tooltip: '更多设置',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 188),
+                icon: const Icon(
+                  Icons.more_vert_rounded,
+                  size: 21,
+                  color: TxColors.iconDefault,
+                ),
+                onSelected: (action) {
+                  switch (action) {
+                    case 'new_ssh':
+                      if (_hostsLoaded) _addHost();
+                    case 'palette_cursor':
+                      _openMobilePaletteAndCursorSheet();
+                    case 'vault':
+                      showKeychainVaultDialog(
+                        context: context,
+                        vaultService: _vaultService,
+                        hosts: _hosts,
+                      );
+                    case 'plugins':
+                      _openPluginManagerSheetOrDialog(pluginContext);
+                    case 'shortcuts':
+                      _openShortcutSettings();
+                  }
+                },
+                itemBuilder: (ctx) => const [
+                  PopupMenuItem(
+                    value: 'new_ssh',
                     child: Row(
                       children: [
-                        Container(
-                          width: 12,
-                          height: 12,
-                          decoration: BoxDecoration(
-                            color: p.surfaceColor,
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                              color: _colorPalette.id == p.id
-                                  ? TxColors.accent
-                                  : TxColors.borderStrong,
-                              width: _colorPalette.id == p.id ? 1.8 : 1.0,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(p.name, style: const TextStyle(fontSize: 12.5)),
+                        Icon(Icons.dns_outlined, size: 18),
+                        SizedBox(width: 10),
+                        Text('新建 SSH 主机'),
                       ],
                     ),
                   ),
-                )
-                .toList(),
-          ),
+                  PopupMenuItem(
+                    value: 'palette_cursor',
+                    child: Row(
+                      children: [
+                        Icon(Icons.contrast_rounded, size: 18),
+                        SizedBox(width: 10),
+                        Text('终端配色与光标'),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'vault',
+                    child: Row(
+                      children: [
+                        Icon(Icons.key_outlined, size: 18),
+                        SizedBox(width: 10),
+                        Text('安全凭据管理'),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'plugins',
+                    child: Row(
+                      children: [
+                        Icon(Icons.widgets_outlined, size: 18),
+                        SizedBox(width: 10),
+                        Text('扩展管理'),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'shortcuts',
+                    child: Row(
+                      children: [
+                        Icon(Icons.keyboard_alt_outlined, size: 18),
+                        SizedBox(width: 10),
+                        Text('外接键盘快捷键'),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ] else ...[
+            _topToolbarAction(
+              tooltip:
+                  '新建本地终端    ${_shortcutConfig.chordFor(ShortcutAction.newTab).displayLabel}',
+              icon: Icons.add_rounded,
+              label: showDesktopLabels ? '新建' : null,
+              onPressed: _newLocalTab,
+            ),
 
-          // 凭据管理
-          IconButton(
-            visualDensity: VisualDensity.compact,
-            constraints: const BoxConstraints(minWidth: 30, minHeight: 28),
-            padding: EdgeInsets.zero,
-            tooltip: '安全凭据管理',
-            icon: const Icon(
-              Icons.key_outlined,
-              size: 16.5,
-              color: TxColors.iconDefault,
+            Container(
+              width: 1,
+              height: 18,
+              margin: const EdgeInsets.symmetric(horizontal: 8),
+              color: TxColors.borderSubtle,
             ),
-            onPressed: () => showKeychainVaultDialog(
-              context: context,
-              vaultService: _vaultService,
-              hosts: _hosts,
-            ),
-          ),
 
-          // 扩展管理
-          IconButton(
-            visualDensity: VisualDensity.compact,
-            constraints: const BoxConstraints(minWidth: 30, minHeight: 28),
-            padding: EdgeInsets.zero,
-            tooltip: '扩展管理',
-            icon: const Icon(
-              Icons.widgets_outlined,
-              size: 16,
-              color: TxColors.iconDefault,
+            // 布局视图切换
+            SizedBox(
+              width: 34,
+              height: 32,
+              child: PopupMenuButton<FormFactorOverride>(
+                tooltip: '布局视图 (${_formFactorOverride.label})',
+                initialValue: _formFactorOverride,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 160),
+                style: IconButton.styleFrom(
+                  hoverColor: TxColors.bgHover,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                ),
+                icon: Icon(
+                  Icons.devices_outlined,
+                  size: 18.5,
+                  color: _formFactorOverride == FormFactorOverride.auto
+                      ? TxColors.iconDefault
+                      : TxColors.accent,
+                ),
+                onSelected: (val) {
+                  setState(() => _formFactorOverride = val);
+                  _persistUiPreferences();
+                },
+                itemBuilder: (context) => FormFactorOverride.values
+                    .map(
+                      (f) => PopupMenuItem(
+                        value: f,
+                        height: 36,
+                        child: Row(
+                          children: [
+                            Icon(
+                              _formFactorOverride == f
+                                  ? Icons.check_rounded
+                                  : null,
+                              size: 15,
+                              color: TxColors.accent,
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              f.label,
+                              style: const TextStyle(fontSize: 13),
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                    .toList(),
+              ),
             ),
-            onPressed: () => showPluginManagerDialog(
-              context: context,
-              pluginManager: _pluginManager,
-              onInstallSampleCommunityPlugin: () async {
-                if (_pluginManager.allPlugins.any(
-                  (p) => p.manifest.id == DockerInspectorPlugin.pluginId,
-                )) {
-                  pluginContext.showToast('Docker 容器扩展已处于启用状态');
-                  return;
-                }
-                await _pluginManager.registerPlugin(DockerInspectorPlugin());
-                _pluginManager.setActivePanelPlugin(
-                  DockerInspectorPlugin.pluginId,
-                );
-                pluginContext.showToast('已启用扩展：Docker 容器');
-              },
-            ),
-          ),
 
-          // 右侧辅助面板开关
-          if (layoutMode != AdaptiveLayoutMode.compact)
+            // 终端配色切换
+            SizedBox(
+              width: 34,
+              height: 32,
+              child: PopupMenuButton<TermXColorPalette>(
+                tooltip: '终端配色',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 190),
+                style: IconButton.styleFrom(
+                  hoverColor: TxColors.bgHover,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                ),
+                icon: const Icon(
+                  Icons.contrast_rounded,
+                  size: 18.5,
+                  color: TxColors.iconDefault,
+                ),
+                onSelected: (p) {
+                  setState(() => _colorPalette = p);
+                  _persistUiPreferences();
+                },
+                itemBuilder: (context) => TermXColorPalette.presets
+                    .map(
+                      (p) => PopupMenuItem(
+                        value: p,
+                        height: 36,
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 13,
+                              height: 13,
+                              decoration: BoxDecoration(
+                                color: p.surfaceColor,
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: _colorPalette.id == p.id
+                                      ? TxColors.accent
+                                      : TxColors.borderStrong,
+                                  width: _colorPalette.id == p.id ? 1.8 : 1.0,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(p.name, style: const TextStyle(fontSize: 13)),
+                          ],
+                        ),
+                      ),
+                    )
+                    .toList(),
+              ),
+            ),
+
+            // 窗口透明度调节（PC 桌面端）
+            if (DesktopNativeBridge.instance.supportsWindowOpacity)
+              _topToolbarAction(
+                tooltip: '窗口透明度 (${(_windowOpacity * 100).round()}%)',
+                icon: Icons.opacity_rounded,
+                label: showDesktopLabels
+                    ? (_windowOpacity < 0.995
+                          ? '${(_windowOpacity * 100).round()}%'
+                          : '透明度')
+                    : null,
+                highlighted: _windowOpacity < 0.995,
+                onPressed: _openWindowOpacityDialog,
+              ),
+
+            // 快捷键设置
+            _topToolbarAction(
+              tooltip:
+                  '快捷键设置    ${_shortcutConfig.chordFor(ShortcutAction.openShortcuts).displayLabel}',
+              icon: Icons.keyboard_alt_outlined,
+              label: showDesktopLabels ? '快捷键' : null,
+              onPressed: _openShortcutSettings,
+            ),
+
+            // 凭据管理
+            _topToolbarAction(
+              tooltip: '安全凭据管理',
+              icon: Icons.key_outlined,
+              label: showDesktopLabels ? '凭据' : null,
+              onPressed: () => showKeychainVaultDialog(
+                context: context,
+                vaultService: _vaultService,
+                hosts: _hosts,
+              ),
+            ),
+
+            // 扩展管理
+            _topToolbarAction(
+              tooltip: '扩展管理',
+              icon: Icons.widgets_outlined,
+              label: showDesktopLabels ? '扩展' : null,
+              onPressed: () => _openPluginManagerSheetOrDialog(pluginContext),
+            ),
+
+            // 右侧辅助面板开关
             ListenableBuilder(
               listenable: _pluginManager,
               builder: (context, _) {
                 final open = _pluginManager.activePanelPlugin != null;
-                return IconButton(
-                  visualDensity: VisualDensity.compact,
-                  constraints: const BoxConstraints(minWidth: 30, minHeight: 28),
-                  padding: EdgeInsets.zero,
+                return _topToolbarAction(
                   tooltip: open ? '隐藏右侧面板' : '展开右侧面板',
-                  icon: Icon(
-                    Icons.space_dashboard_outlined,
-                    size: 16,
-                    color: open ? TxColors.textPrimary : TxColors.iconDefault,
-                  ),
+                  icon: Icons.space_dashboard_outlined,
+                  label: showDesktopLabels ? '面板' : null,
+                  highlighted: open,
                   onPressed: () {
                     if (open) {
                       _pluginManager.setActivePanelPlugin(null);
@@ -1396,6 +2339,7 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
                 );
               },
             ),
+          ],
         ],
       ),
     );
@@ -1431,82 +2375,90 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 8, 4),
+            padding: const EdgeInsets.fromLTRB(12, 10, 8, 6),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 const Text(
                   '服务器',
                   style: TextStyle(
-                    fontSize: 11.5,
+                    fontSize: 13,
                     fontWeight: FontWeight.w600,
                     letterSpacing: 0.3,
                     color: TxColors.textSecondary,
                   ),
                 ),
-                IconButton(
-                  visualDensity: VisualDensity.compact,
-                  constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
-                  padding: EdgeInsets.zero,
-                  tooltip: '新建 SSH 主机',
-                  icon: const Icon(
-                    Icons.add_rounded,
-                    size: 16.5,
-                    color: TxColors.iconDefault,
+                SizedBox(
+                  width: 32,
+                  height: 30,
+                  child: IconButton(
+                    padding: EdgeInsets.zero,
+                    tooltip: '新建 SSH 主机',
+                    style: IconButton.styleFrom(
+                      hoverColor: TxColors.bgHover,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                    ),
+                    icon: const Icon(
+                      Icons.add_rounded,
+                      size: 18.5,
+                      color: TxColors.iconDefault,
+                    ),
+                    onPressed: _hostsLoaded ? () => _addHost() : null,
                   ),
-                  onPressed: _hostsLoaded ? () => _addHost() : null,
                 ),
               ],
             ),
           ),
           if (_hosts.length > 1 || query.isNotEmpty)
             Padding(
-              padding: const EdgeInsets.fromLTRB(10, 0, 10, 6),
+              padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
               child: SizedBox(
-                height: 27,
+                height: 32,
                 child: TextField(
                   controller: _hostSearchCtrl,
                   onChanged: (_) => setState(() {}),
                   style: const TextStyle(
-                    fontSize: 11.5,
+                    fontSize: 12.5,
                     color: TxColors.textPrimary,
                   ),
                   decoration: InputDecoration(
                     isDense: true,
                     hintText: '搜索主机、分组或 IP…',
                     hintStyle: const TextStyle(
-                      fontSize: 11,
+                      fontSize: 12,
                       color: TxColors.textMuted,
                     ),
                     prefixIcon: const Icon(
                       Icons.search_rounded,
-                      size: 13.5,
+                      size: 15,
                       color: TxColors.textMuted,
                     ),
-                    prefixIconConstraints: const BoxConstraints(minWidth: 26),
+                    prefixIconConstraints: const BoxConstraints(minWidth: 30),
                     suffixIcon: query.isNotEmpty
                         ? InkWell(
                             onTap: () => setState(() => _hostSearchCtrl.clear()),
                             child: const Icon(
                               Icons.close_rounded,
-                              size: 13,
+                              size: 15,
                               color: TxColors.textSecondary,
                             ),
                           )
                         : null,
-                    suffixIconConstraints: const BoxConstraints(minWidth: 22),
+                    suffixIconConstraints: const BoxConstraints(minWidth: 26),
                     contentPadding: const EdgeInsets.symmetric(
                       horizontal: 8,
-                      vertical: 5,
+                      vertical: 6,
                     ),
                     filled: true,
                     fillColor: TxColors.bgChrome,
                     border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(5),
+                      borderRadius: BorderRadius.circular(6),
                       borderSide: const BorderSide(color: TxColors.borderSubtle),
                     ),
                     enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(5),
+                      borderRadius: BorderRadius.circular(6),
                       borderSide: const BorderSide(color: TxColors.borderSubtle),
                     ),
                   ),
@@ -1555,11 +2507,12 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
                                     _collapsedGroups.add(groupName);
                                   }
                                 });
+                                _persistUiPreferences();
                               },
                               child: Padding(
                                 padding: const EdgeInsets.symmetric(
-                                  horizontal: 4,
-                                  vertical: 4,
+                                  horizontal: 5,
+                                  vertical: 6,
                                 ),
                                 child: Row(
                                   children: [
@@ -1567,8 +2520,8 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
                                       isCollapsed
                                           ? Icons.chevron_right_rounded
                                           : Icons.expand_more_rounded,
-                                      size: 14,
-                                      color: TxColors.textMuted,
+                                      size: 16,
+                                      color: TxColors.textSecondary,
                                     ),
                                     const SizedBox(width: 4),
                                     Expanded(
@@ -1577,9 +2530,9 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
                                         style: const TextStyle(
-                                          fontSize: 11,
+                                          fontSize: 12,
                                           fontWeight: FontWeight.w600,
-                                          color: TxColors.textMuted,
+                                          color: TxColors.textSecondary,
                                         ),
                                       ),
                                     ),
@@ -1625,7 +2578,7 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
 
           // 底部简洁状态与快速添加栏
           Container(
-            height: 34,
+            height: 38,
             padding: const EdgeInsets.symmetric(horizontal: 10),
             decoration: const BoxDecoration(
               border: Border(top: BorderSide(color: TxColors.borderSubtle)),
@@ -1633,23 +2586,24 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
             child: Row(
               children: [
                 InkWell(
-                  borderRadius: BorderRadius.circular(5),
+                  borderRadius: BorderRadius.circular(6),
                   onTap: _hostsLoaded ? () => _addHost() : null,
                   child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                    padding: EdgeInsets.symmetric(horizontal: 6, vertical: 5),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(
                           Icons.add_rounded,
-                          size: 14,
+                          size: 16,
                           color: TxColors.textSecondary,
                         ),
-                        SizedBox(width: 4),
+                        SizedBox(width: 5),
                         Text(
                           '新建连接',
                           style: TextStyle(
-                            fontSize: 11.5,
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w500,
                             color: TxColors.textSecondary,
                           ),
                         ),
@@ -1661,7 +2615,7 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
                 Text(
                   '$sshCount 台远程主机',
                   style: const TextStyle(
-                    fontSize: 10.5,
+                    fontSize: 11.5,
                     color: TxColors.textMuted,
                   ),
                 ),
@@ -1766,8 +2720,10 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
               size: 18,
               color: TxColors.iconDefault,
             ),
-            onPressed: () =>
-                setState(() => _formFactorOverride = FormFactorOverride.auto),
+            onPressed: () {
+              setState(() => _formFactorOverride = FormFactorOverride.auto);
+              _persistUiPreferences();
+            },
           ),
           const SizedBox(height: 8),
         ],
@@ -2190,7 +3146,7 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
             child: ExcludeFocus(
               excluding: item != tab,
               child: RepaintBoundary(
-                child: _buildTabTerminalArea(item, layoutMode),
+                child: _buildTabTerminalArea(item, layoutMode, pluginContext),
               ),
             ),
           ),
@@ -2198,7 +3154,11 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
     );
   }
 
-  Widget _buildTabTerminalArea(TerminalTab tab, AdaptiveLayoutMode layoutMode) {
+  Widget _buildTabTerminalArea(
+    TerminalTab tab,
+    AdaptiveLayoutMode layoutMode,
+    PluginContext pluginContext,
+  ) {
     final maximized = tab.maximizedPaneId;
     final compact = layoutMode == AdaptiveLayoutMode.compact;
     return Stack(
@@ -2239,6 +3199,7 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
                     : compact
                     ? PaneLeaf(tab.focusedPaneId)
                     : tab.root,
+                pluginContext,
               ),
             ),
           ],
@@ -2248,6 +3209,9 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
             _ipadThumbPadsVisible)
           Positioned.fill(
             child: IpadFloatingThumbPads(
+              modifierController: _virtualModifierController,
+              onRequestTerminalFocus: () =>
+                  _workspace.activePane?.focus.requestFocus(),
               onSendRaw: (seq) => _activeSession?.sendRawInput(seq),
             ),
           ),
@@ -2255,13 +3219,32 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
     );
   }
 
-  Widget _buildPaneLayout(TerminalTab tab, PaneLayout layout) {
+  void _togglePaneBeautyCard(
+    SshSessionController session,
+    PluginContext pluginContext,
+  ) {
+    if (!_pluginManager.isPluginEnabled(CommandBeautifierPlugin.pluginId)) {
+      pluginContext.showToast('命令输出美化插件当前已停用，可在右上角「扩展管理」中启用');
+      return;
+    }
+    if (!_beautifierPlugin.toggleSessionDisplayMode(session.sessionId)) {
+      pluginContext.requestOpenPanel(CommandBeautifierPlugin.pluginId);
+      pluginContext.showToast('当前窗格暂无已捕获的命令输出，可在右侧命令清单中一键预览');
+    }
+  }
+
+  Widget _buildPaneLayout(
+    TerminalTab tab,
+    PaneLayout layout,
+    PluginContext pluginContext,
+  ) {
     if (layout is PaneSplit) {
       return ResizablePaneSplit(
         key: ObjectKey(layout),
         split: layout,
-        first: _buildPaneLayout(tab, layout.first),
-        second: _buildPaneLayout(tab, layout.second),
+        first: _buildPaneLayout(tab, layout.first, pluginContext),
+        second: _buildPaneLayout(tab, layout.second, pluginContext),
+        onRatioChanged: _persistUiPreferences,
       );
     }
     final pane = _workspace.panes[(layout as PaneLeaf).id]!;
@@ -2294,6 +3277,24 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
           ? PaneItemDockPayload(tab, pane.id)
           : null,
       headerDragTitle: pane.session.host.name,
+      terminalOverlay: ListenableBuilder(
+        listenable: _pluginManager,
+        builder: (context, _) =>
+            _pluginManager.buildTerminalOverlay(
+              context,
+              pluginContext,
+              pane.session,
+            ) ??
+            const IgnorePointer(child: SizedBox.expand()),
+      ),
+      onToggleBeautyCard: () =>
+          _togglePaneBeautyCard(pane.session, pluginContext),
+      shortcutConfig: _shortcutConfig,
+      onOpenShortcutSettings: _openShortcutSettings,
+      cursorType: _cursorType,
+      onCursorTypeChanged: _setCursorType,
+      onFontSizeChanged: _persistUiPreferences,
+      virtualModifierController: _virtualModifierController,
     );
   }
 
@@ -2303,6 +3304,8 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
         return '监控';
       case SftpManagerPlugin.pluginId:
         return '文件';
+      case CommandBeautifierPlugin.pluginId:
+        return '美化';
       case SnippetsPlugin.pluginId:
         return '片段';
       case PortForwardPlugin.pluginId:
@@ -2324,8 +3327,8 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
         final plugins = _pluginManager.enabledPlugins;
         final activeId = _pluginManager.activePanelPluginId;
         return Container(
-          height: 36,
-          padding: const EdgeInsets.symmetric(horizontal: 6),
+          height: 44,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
           decoration: const BoxDecoration(
             color: TxColors.bgChrome,
             border: Border(bottom: BorderSide(color: TxColors.borderSubtle)),
@@ -2342,22 +3345,23 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
                     final selected = m.id == activeId;
                     return Padding(
                       padding: const EdgeInsets.symmetric(
-                        horizontal: 2,
+                        horizontal: 2.5,
                         vertical: 5,
                       ),
                       child: InkWell(
-                        borderRadius: BorderRadius.circular(5),
+                        borderRadius: BorderRadius.circular(6),
+                        hoverColor: TxColors.bgHover,
                         onTap: () => _pluginManager.setActivePanelPlugin(m.id),
                         child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 9),
+                          padding: const EdgeInsets.symmetric(horizontal: 11),
                           decoration: BoxDecoration(
                             color: selected
                                 ? TxColors.bgElevated
                                 : Colors.transparent,
-                            borderRadius: BorderRadius.circular(5),
+                            borderRadius: BorderRadius.circular(6),
                             border: Border.all(
                               color: selected
-                                  ? TxColors.borderDefault
+                                  ? TxColors.accent.withValues(alpha: 0.5)
                                   : Colors.transparent,
                             ),
                           ),
@@ -2366,19 +3370,19 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
                             children: [
                               Icon(
                                 m.icon,
-                                size: 13.5,
+                                size: 16,
                                 color: selected
-                                    ? TxColors.textPrimary
+                                    ? TxColors.accent
                                     : TxColors.textMuted,
                               ),
-                              const SizedBox(width: 5),
+                              const SizedBox(width: 6),
                               Text(
                                 _shortPluginTitle(m),
                                 style: TextStyle(
-                                  fontSize: 11.5,
+                                  fontSize: 13,
                                   fontWeight: selected
                                       ? FontWeight.w600
-                                      : FontWeight.w400,
+                                      : FontWeight.w500,
                                   color: selected
                                       ? TxColors.textPrimary
                                       : TxColors.textSecondary,
@@ -2393,17 +3397,25 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
                 ),
               ),
               if (!isCompactSheet)
-                IconButton(
-                  visualDensity: VisualDensity.compact,
-                  constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
-                  padding: EdgeInsets.zero,
-                  tooltip: '收起右侧面板',
-                  icon: const Icon(
-                    Icons.close_rounded,
-                    size: 15,
-                    color: TxColors.textMuted,
+                SizedBox(
+                  width: 32,
+                  height: 32,
+                  child: IconButton(
+                    padding: EdgeInsets.zero,
+                    tooltip: '收起右侧面板',
+                    style: IconButton.styleFrom(
+                      hoverColor: TxColors.bgHover,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                    ),
+                    icon: const Icon(
+                      Icons.close_rounded,
+                      size: 18,
+                      color: TxColors.textSecondary,
+                    ),
+                    onPressed: () => _pluginManager.setActivePanelPlugin(null),
                   ),
-                  onPressed: () => _pluginManager.setActivePanelPlugin(null),
                 ),
             ],
           ),
@@ -2412,7 +3424,18 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
     );
   }
 
-  Widget _buildBottomPluginStatusBar(PluginContext pluginContext) {
+  Widget _buildBottomPluginStatusBar(
+    PluginContext pluginContext,
+    AdaptiveLayoutMode layoutMode,
+  ) {
+    final mediaPadding = MediaQuery.paddingOf(context);
+    final isCompact = layoutMode == AdaptiveLayoutMode.compact;
+    final hPad = isCompact ? 14.0 : 12.0;
+    final fullVaultLabel = _vaultService.platformVaultBackendName;
+    final vaultLabel = isCompact
+        ? fullVaultLabel.split(' (').first
+        : fullVaultLabel;
+
     return ListenableBuilder(
       listenable: _pluginManager,
       builder: (context, _) {
@@ -2421,14 +3444,20 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
           final w = plugin.buildStatusBarWidget(context, pluginContext);
           if (w != null) {
             statusWidgets.add(
-              Padding(padding: const EdgeInsets.only(right: 10), child: w),
+              Padding(padding: const EdgeInsets.only(right: 12), child: w),
             );
           }
         }
 
         return Container(
-          height: 26,
-          padding: const EdgeInsets.symmetric(horizontal: 10),
+          key: const ValueKey('termx_bottom_status_bar'),
+          height: 30 + mediaPadding.bottom,
+          padding: EdgeInsets.fromLTRB(
+            hPad + mediaPadding.left,
+            0,
+            hPad + mediaPadding.right,
+            mediaPadding.bottom,
+          ),
           decoration: const BoxDecoration(
             color: TxColors.bgChrome,
             border: Border(top: BorderSide(color: TxColors.borderSubtle)),
@@ -2437,22 +3466,27 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
             children: [
               const Icon(
                 Icons.lock_outline_rounded,
-                size: 11.5,
+                size: 13,
                 color: TxColors.textMuted,
               ),
-              const SizedBox(width: 5),
-              Text(
-                _vaultService.platformVaultBackendName,
-                style: const TextStyle(
-                  fontSize: 10.5,
-                  color: TxColors.textMuted,
+              const SizedBox(width: 6),
+              Flexible(
+                fit: FlexFit.loose,
+                child: Text(
+                  vaultLabel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    color: TxColors.textMuted,
+                  ),
                 ),
               ),
               if (statusWidgets.isNotEmpty)
                 Container(
                   width: 1,
-                  height: 11,
-                  margin: const EdgeInsets.symmetric(horizontal: 10),
+                  height: 13,
+                  margin: EdgeInsets.symmetric(horizontal: isCompact ? 10 : 12),
                   color: TxColors.borderSubtle,
                 )
               else
@@ -2528,9 +3562,9 @@ class _HostSidebarItemState extends State<HostSidebarItem> {
           child: Container(
             padding: EdgeInsets.fromLTRB(
               8,
-              6,
-              widget.isEditable ? 2 : 8,
-              6,
+              7,
+              widget.isEditable ? 4 : 8,
+              7,
             ),
             decoration: BoxDecoration(
               color: bg,
@@ -2539,8 +3573,8 @@ class _HostSidebarItemState extends State<HostSidebarItem> {
             child: Row(
               children: [
                 Container(
-                  width: 2.5,
-                  height: 18,
+                  width: 3,
+                  height: 20,
                   decoration: BoxDecoration(
                     color: widget.isCurrent
                         ? indicatorColor
@@ -2548,10 +3582,10 @@ class _HostSidebarItemState extends State<HostSidebarItem> {
                     borderRadius: BorderRadius.circular(2),
                   ),
                 ),
-                const SizedBox(width: 7),
+                const SizedBox(width: 8),
                 OsLogoIcon(
                   os: widget.osType,
-                  size: 17,
+                  size: 19,
                   tooltip: widget.osLabel,
                 ),
                 const SizedBox(width: 9),
@@ -2564,8 +3598,8 @@ class _HostSidebarItemState extends State<HostSidebarItem> {
                         children: [
                           if (widget.hostColor != null) ...[
                             Container(
-                              width: 6,
-                              height: 6,
+                              width: 6.5,
+                              height: 6.5,
                               decoration: BoxDecoration(
                                 color: widget.hostColor,
                                 shape: BoxShape.circle,
@@ -2579,7 +3613,7 @@ class _HostSidebarItemState extends State<HostSidebarItem> {
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
-                                fontSize: 12.5,
+                                fontSize: 13,
                                 fontWeight: widget.isCurrent
                                     ? FontWeight.w600
                                     : FontWeight.w500,
@@ -2589,7 +3623,7 @@ class _HostSidebarItemState extends State<HostSidebarItem> {
                           ),
                         ],
                       ),
-                      const SizedBox(height: 1.5),
+                      const SizedBox(height: 2),
                       Text(
                         h.authMethod == AuthMethod.localShell
                             ? '${h.username} · 本机终端'
@@ -2597,13 +3631,13 @@ class _HostSidebarItemState extends State<HostSidebarItem> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                          fontSize: 10.5,
+                          fontSize: 11.5,
                           fontFamily: TxColors.monoFamily,
                           color: TxColors.textMuted,
                         ),
                       ),
                       if (showTags) ...[
-                        const SizedBox(height: 3.5),
+                        const SizedBox(height: 4),
                         Wrap(
                           spacing: 4,
                           runSpacing: 3,
@@ -2611,8 +3645,8 @@ class _HostSidebarItemState extends State<HostSidebarItem> {
                             for (final t in h.tags)
                               Container(
                                 padding: const EdgeInsets.symmetric(
-                                  horizontal: 5,
-                                  vertical: 1,
+                                  horizontal: 5.5,
+                                  vertical: 1.5,
                                 ),
                                 decoration: BoxDecoration(
                                   color: TxColors.bgElevated,
@@ -2624,7 +3658,7 @@ class _HostSidebarItemState extends State<HostSidebarItem> {
                                 child: Text(
                                   t,
                                   style: const TextStyle(
-                                    fontSize: 9.5,
+                                    fontSize: 10.5,
                                     color: TxColors.textSecondary,
                                   ),
                                 ),
@@ -2636,24 +3670,128 @@ class _HostSidebarItemState extends State<HostSidebarItem> {
                   ),
                 ),
                 if (widget.isEditable)
-                  IconButton(
-                    visualDensity: VisualDensity.compact,
-                    constraints: const BoxConstraints(
-                      minWidth: 26,
-                      minHeight: 26,
+                  SizedBox(
+                    width: 30,
+                    height: 30,
+                    child: IconButton(
+                      padding: EdgeInsets.zero,
+                      tooltip: '编辑会话配置',
+                      style: IconButton.styleFrom(
+                        hoverColor: TxColors.bgHover,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(5),
+                        ),
+                      ),
+                            icon: Icon(
+                        Icons.edit_outlined,
+                        size: 15.5,
+                        color: (_hovered || widget.isCurrent)
+                            ? TxColors.iconDefault
+                            : TxColors.textMuted.withValues(alpha: 0.45),
+                      ),
+                      onPressed: widget.onEdit,
                     ),
-                    padding: EdgeInsets.zero,
-                    tooltip: '编辑会话配置',
-                    icon: Icon(
-                      Icons.edit_outlined,
-                      size: 13.5,
-                      color: (_hovered || widget.isCurrent)
-                          ? TxColors.iconDefault
-                          : TxColors.textMuted.withValues(alpha: 0.35),
-                    ),
-                    onPressed: widget.onEdit,
                   ),
               ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 右侧检查器面板 1:1 全局坐标跟随分隔手柄
+///
+/// 采用底层 [Listener] 捕获屏幕全局坐标 (`event.position.dx`) 与按下时的基准宽度做纯增量计算，
+/// 彻底避免 [GestureDetector.onHorizontalDragUpdate] 因自身 [RenderBox] 同步位移引发的局部坐标
+/// 反向抵消（“不跟手/橡皮筋滞后”）与 18px 拖拽死区问题。
+class _RightPanelResizeHandle extends StatefulWidget {
+  const _RightPanelResizeHandle({
+    super.key,
+    required this.currentWidth,
+    required this.minWidth,
+    required this.maxWidth,
+    required this.onWidthChanged,
+    required this.onDragEnd,
+    required this.onResetDefault,
+  });
+
+  final double currentWidth;
+  final double minWidth;
+  final double maxWidth;
+  final ValueChanged<double> onWidthChanged;
+  final VoidCallback onDragEnd;
+  final VoidCallback onResetDefault;
+
+  @override
+  State<_RightPanelResizeHandle> createState() =>
+      _RightPanelResizeHandleState();
+}
+
+class _RightPanelResizeHandleState extends State<_RightPanelResizeHandle> {
+  bool _hovered = false;
+  int? _activePointer;
+  double _dragStartGlobalX = 0.0;
+  double _dragStartWidth = 0.0;
+
+  bool get _dragging => _activePointer != null;
+
+  @override
+  Widget build(BuildContext context) {
+    final highlight = _hovered || _dragging;
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeLeftRight,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onDoubleTap: () {
+          setState(() => _activePointer = null);
+          widget.onResetDefault();
+        },
+        child: Listener(
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: (event) {
+            if (event.kind == PointerDeviceKind.mouse && event.buttons != 1) {
+              return;
+            }
+            setState(() {
+              _activePointer = event.pointer;
+              _dragStartGlobalX = event.position.dx;
+              _dragStartWidth = widget.currentWidth;
+            });
+          },
+          onPointerMove: (event) {
+            if (event.pointer != _activePointer) return;
+            final deltaX = event.position.dx - _dragStartGlobalX;
+            final nextWidth = (_dragStartWidth - deltaX).clamp(
+              widget.minWidth,
+              widget.maxWidth,
+            );
+            if ((nextWidth - widget.currentWidth).abs() > 0.05) {
+              widget.onWidthChanged(nextWidth);
+            }
+          },
+          onPointerUp: (event) {
+            if (event.pointer == _activePointer) {
+              setState(() => _activePointer = null);
+              widget.onDragEnd();
+            }
+          },
+          onPointerCancel: (event) {
+            if (event.pointer == _activePointer) {
+              setState(() => _activePointer = null);
+              widget.onDragEnd();
+            }
+          },
+          child: Container(
+            width: 7,
+            color: TxColors.bgSidebar,
+            alignment: Alignment.centerLeft,
+            child: Container(
+              width: highlight ? 2 : 1,
+              color: highlight ? TxColors.accent : TxColors.borderSubtle,
             ),
           ),
         ),

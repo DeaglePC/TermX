@@ -27,6 +27,9 @@ class FlutterWindow : public Win32Window {
 
  private:
   void SetupNativeIoChannel();
+  void RestoreSavedWindowState();
+  void UpdateCachedNormalRect(HWND hwnd) noexcept;
+  void PersistWindowState(HWND hwnd) noexcept;
 
   // The project to run.
   flutter::DartProject project_;
@@ -40,6 +43,9 @@ class FlutterWindow : public Win32Window {
 
   Win32FileDropTarget* drop_target_ = nullptr;
   HWND drop_target_hwnd_ = nullptr;
+  RECT last_normal_rect_ = {0, 0, 0, 0};
+  bool has_normal_rect_ = false;
+  bool start_maximized_ = false;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

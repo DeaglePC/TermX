@@ -151,12 +151,12 @@ class _TerminalTabButtonState extends State<TerminalTabButton> {
                         ),
                       ),
                   Padding(
-                    padding: const EdgeInsets.only(left: 6, right: 5),
+                    padding: const EdgeInsets.only(left: 8, right: 6),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Opacity(
-                          opacity: (active || _hovered) ? 0.75 : 0.28,
+                          opacity: (active || _hovered) ? 0.80 : 0.32,
                           child: widget.dragHandle,
                         ),
                         Listener(
@@ -170,24 +170,24 @@ class _TerminalTabButtonState extends State<TerminalTabButton> {
                             behavior: HitTestBehavior.opaque,
                             child: Padding(
                               padding: const EdgeInsets.symmetric(
-                                vertical: 5,
-                                horizontal: 3,
+                                vertical: 6,
+                                horizontal: 4,
                               ),
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
                                   widget.status,
-                                  const SizedBox(width: 6),
+                                  const SizedBox(width: 7),
                                   ConstrainedBox(
                                     constraints: const BoxConstraints(
-                                      maxWidth: 156,
+                                      maxWidth: 176,
                                     ),
                                     child: Text(
                                       widget.title,
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
-                                        fontSize: 12,
+                                        fontSize: 13,
                                         fontWeight: active
                                             ? FontWeight.w600
                                             : FontWeight.w400,
@@ -201,21 +201,21 @@ class _TerminalTabButtonState extends State<TerminalTabButton> {
                                   ),
                                   if (widget.paneCount > 1)
                                     Container(
-                                      margin: const EdgeInsets.only(left: 5),
+                                      margin: const EdgeInsets.only(left: 6),
                                       padding: const EdgeInsets.symmetric(
-                                        horizontal: 4,
-                                        vertical: 0.5,
+                                        horizontal: 5,
+                                        vertical: 1,
                                       ),
                                       decoration: BoxDecoration(
                                         color: Colors.white.withValues(
-                                          alpha: 0.07,
+                                          alpha: 0.08,
                                         ),
-                                        borderRadius: BorderRadius.circular(3),
+                                        borderRadius: BorderRadius.circular(4),
                                       ),
                                       child: Text(
                                         '${widget.paneCount}',
                                         style: const TextStyle(
-                                          fontSize: 10,
+                                          fontSize: 11,
                                           fontFamily: TxColors.monoFamily,
                                           color: TxColors.textSecondary,
                                         ),
@@ -233,19 +233,19 @@ class _TerminalTabButtonState extends State<TerminalTabButton> {
                           child: Tooltip(
                             message: '关闭标签',
                             child: InkWell(
-                              borderRadius: BorderRadius.circular(4),
+                              borderRadius: BorderRadius.circular(5),
                               onTap: widget.onClose,
                               child: Container(
-                                padding: const EdgeInsets.all(3),
+                                padding: const EdgeInsets.all(4.5),
                                 decoration: BoxDecoration(
                                   color: _closeHovered
-                                      ? Colors.white.withValues(alpha: 0.10)
+                                      ? Colors.white.withValues(alpha: 0.12)
                                       : Colors.transparent,
-                                  borderRadius: BorderRadius.circular(4),
+                                  borderRadius: BorderRadius.circular(5),
                                 ),
                                 child: Icon(
                                   Icons.close,
-                                  size: 13,
+                                  size: 15,
                                   color: _closeHovered
                                       ? TxColors.textPrimary
                                       : ((active || _hovered)

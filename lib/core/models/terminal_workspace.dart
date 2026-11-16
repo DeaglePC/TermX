@@ -438,6 +438,159 @@ class TerminalWorkspace extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 捕获当前所有打开的会话标签、嵌套分屏树、分屏比例、字号与焦点状态快照
+  WorkspaceLayoutSnapshot captureSnapshot() {
+    final tabSnapshots = <WorkspaceTabSnapshot>[];
+    var activeIdx = 0;
+    for (var i = 0; i < tabs.length; i++) {
+      final tab = tabs[i];
+      if (tab.id == _activeTabId) {
+        activeIdx = tabSnapshots.length;
+      }
+      final rootSnap = _captureLayoutNode(
+        tab.root,
+        focusedPaneId: tab.focusedPaneId,
+        maximizedPaneId: tab.maximizedPaneId,
+      );
+      if (rootSnap != null) {
+        tabSnapshots.add(
+          WorkspaceTabSnapshot(
+            root: rootSnap,
+            customTitle: tab.customTitle,
+            customColorValue: tab.customColor?.toARGB32(),
+          ),
+        );
+      }
+    }
+    return WorkspaceLayoutSnapshot(
+      tabs: tabSnapshots,
+      activeTabIndex: tabSnapshots.isEmpty
+          ? 0
+          : activeIdx.clamp(0, tabSnapshots.length - 1),
+    );
+  }
+
+  WorkspacePaneNodeSnapshot? _captureLayoutNode(
+    PaneLayout layout, {
+    required String focusedPaneId,
+    required String? maximizedPaneId,
+  }) {
+    switch (layout) {
+      case PaneLeaf(:final id):
+        final pane = panes[id];
+        if (pane == null) return null;
+        return WorkspacePaneLeafSnapshot(
+          hostId: pane.session.host.id,
+          fontSize: pane.fontSize,
+          isFocused: id == focusedPaneId,
+          isMaximized: id == maximizedPaneId,
+        );
+      case PaneSplit(:final axis, :final ratio, :final first, :final second):
+        final firstSnap = _captureLayoutNode(
+          first,
+          focusedPaneId: focusedPaneId,
+          maximizedPaneId: maximizedPaneId,
+        );
+        final secondSnap = _captureLayoutNode(
+          second,
+          focusedPaneId: focusedPaneId,
+          maximizedPaneId: maximizedPaneId,
+        );
+        if (firstSnap == null) return secondSnap;
+        if (secondSnap == null) return firstSnap;
+        return WorkspacePaneSplitSnapshot(
+          axis: axis,
+          ratio: ratio,
+          first: firstSnap,
+          second: secondSnap,
+        );
+    }
+  }
+
+  /// 从持久化快照一键还原多标签与嵌套分屏布局，返回新建的所有 [TerminalPane] 以供并发建连
+  List<TerminalPane> restoreFromSnapshot(
+    WorkspaceLayoutSnapshot snapshot,
+    HostConfig? Function(String hostId) resolveHost,
+  ) {
+    final createdPanes = <TerminalPane>[];
+    final restoredTabs = <TerminalTab>[];
+
+    for (final tabSnap in snapshot.tabs) {
+      String? focusedId;
+      String? maximizedId;
+
+      PaneLayout? buildNode(WorkspacePaneNodeSnapshot node) {
+        switch (node) {
+          case WorkspacePaneLeafSnapshot(
+            :final hostId,
+            :final fontSize,
+            :final isFocused,
+            :final isMaximized,
+          ):
+            final host = resolveHost(hostId);
+            if (host == null) return null;
+            final pane = _create(host);
+            pane.fontSize = fontSize.clamp(8.0, 32.0);
+            createdPanes.add(pane);
+            if (isFocused) focusedId = pane.id;
+            if (isMaximized) maximizedId = pane.id;
+            return PaneLeaf(pane.id);
+
+          case WorkspacePaneSplitSnapshot(
+            :final axis,
+            :final ratio,
+            :final first,
+            :final second,
+          ):
+            final leftLayout = buildNode(first);
+            final rightLayout = buildNode(second);
+            if (leftLayout == null) return rightLayout;
+            if (rightLayout == null) return leftLayout;
+            final split = PaneSplit(axis, leftLayout, rightLayout)
+              ..ratio = ratio.clamp(0.15, 0.85);
+            return split;
+        }
+      }
+
+      final rootLayout = buildNode(tabSnap.root);
+      if (rootLayout == null || rootLayout.paneIds.isEmpty) continue;
+      final firstPane = panes[rootLayout.paneIds.first]!;
+      final tab = TerminalTab(
+        firstPane,
+        id: _nextTabId(),
+        customColor: tabSnap.customColorValue != null
+            ? Color(tabSnap.customColorValue!)
+            : (firstPane.session.host.tabColorValue != null
+                  ? Color(firstPane.session.host.tabColorValue!)
+                  : null),
+      )
+        ..root = rootLayout
+        ..customTitle = tabSnap.customTitle
+        ..focusedPaneId =
+            (focusedId != null && rootLayout.paneIds.contains(focusedId))
+            ? focusedId!
+            : rootLayout.paneIds.first
+        ..maximizedPaneId =
+            (maximizedId != null && rootLayout.paneIds.contains(maximizedId))
+            ? maximizedId
+            : null;
+      restoredTabs.add(tab);
+    }
+
+    if (restoredTabs.isEmpty) {
+      return const [];
+    }
+
+    tabs.addAll(restoredTabs);
+    final activeIndex = snapshot.activeTabIndex.clamp(
+      0,
+      restoredTabs.length - 1,
+    );
+    _activeTabId = restoredTabs[activeIndex].id;
+    notifyListeners();
+    return createdPanes;
+  }
+
   @override
   void dispose() {
     for (final pane in panes.values) {
@@ -445,4 +598,167 @@ class TerminalWorkspace extends ChangeNotifier {
     }
     super.dispose();
   }
+}
+
+/// 工作区完整标签与分屏树持久化快照
+class WorkspaceLayoutSnapshot {
+  const WorkspaceLayoutSnapshot({
+    required this.tabs,
+    this.activeTabIndex = 0,
+  });
+
+  final List<WorkspaceTabSnapshot> tabs;
+  final int activeTabIndex;
+
+  Map<String, dynamic> toJson() => {
+    'activeTabIndex': activeTabIndex,
+    'tabs': [for (final t in tabs) t.toJson()],
+  };
+
+  factory WorkspaceLayoutSnapshot.fromJson(Map<String, dynamic> json) {
+    final rawTabs = json['tabs'];
+    final parsedTabs = <WorkspaceTabSnapshot>[];
+    if (rawTabs is List) {
+      for (final item in rawTabs) {
+        if (item is Map) {
+          final snap = WorkspaceTabSnapshot.tryFromJson(
+            item.cast<String, dynamic>(),
+          );
+          if (snap != null) parsedTabs.add(snap);
+        }
+      }
+    }
+    final activeIdx = (json['activeTabIndex'] as num?)?.toInt() ?? 0;
+    return WorkspaceLayoutSnapshot(
+      tabs: parsedTabs,
+      activeTabIndex: parsedTabs.isEmpty
+          ? 0
+          : activeIdx.clamp(0, parsedTabs.length - 1),
+    );
+  }
+}
+
+class WorkspaceTabSnapshot {
+  const WorkspaceTabSnapshot({
+    required this.root,
+    this.customTitle,
+    this.customColorValue,
+  });
+
+  final WorkspacePaneNodeSnapshot root;
+  final String? customTitle;
+  final int? customColorValue;
+
+  Map<String, dynamic> toJson() => {
+    'root': root.toJson(),
+    if (customTitle != null && customTitle!.isNotEmpty)
+      'customTitle': customTitle,
+    if (customColorValue != null) 'customColorValue': customColorValue,
+  };
+
+  static WorkspaceTabSnapshot? tryFromJson(Map<String, dynamic> json) {
+    final rawRoot = json['root'];
+    if (rawRoot is! Map) return null;
+    final root = WorkspacePaneNodeSnapshot.tryFromJson(
+      rawRoot.cast<String, dynamic>(),
+    );
+    if (root == null) return null;
+    return WorkspaceTabSnapshot(
+      root: root,
+      customTitle: json['customTitle'] as String?,
+      customColorValue: (json['customColorValue'] as num?)?.toInt(),
+    );
+  }
+}
+
+sealed class WorkspacePaneNodeSnapshot {
+  const WorkspacePaneNodeSnapshot();
+
+  Map<String, dynamic> toJson();
+
+  static WorkspacePaneNodeSnapshot? tryFromJson(Map<String, dynamic> json) {
+    final type = json['type'] as String?;
+    if (type == 'leaf') {
+      final hostId = json['hostId'] as String?;
+      if (hostId == null || hostId.isEmpty) return null;
+      return WorkspacePaneLeafSnapshot(
+        hostId: hostId,
+        fontSize: ((json['fontSize'] as num?)?.toDouble() ?? 13.5).clamp(
+          8.0,
+          32.0,
+        ),
+        isFocused: json['isFocused'] == true,
+        isMaximized: json['isMaximized'] == true,
+      );
+    }
+    if (type == 'split') {
+      final rawFirst = json['first'];
+      final rawSecond = json['second'];
+      if (rawFirst is! Map || rawSecond is! Map) return null;
+      final first = tryFromJson(rawFirst.cast<String, dynamic>());
+      final second = tryFromJson(rawSecond.cast<String, dynamic>());
+      if (first == null) return second;
+      if (second == null) return first;
+      final axis = (json['axis'] as String?) == 'vertical'
+          ? Axis.vertical
+          : Axis.horizontal;
+      final ratio = ((json['ratio'] as num?)?.toDouble() ?? 0.5).clamp(
+        0.15,
+        0.85,
+      );
+      return WorkspacePaneSplitSnapshot(
+        axis: axis,
+        ratio: ratio,
+        first: first,
+        second: second,
+      );
+    }
+    return null;
+  }
+}
+
+class WorkspacePaneLeafSnapshot extends WorkspacePaneNodeSnapshot {
+  const WorkspacePaneLeafSnapshot({
+    required this.hostId,
+    this.fontSize = 13.5,
+    this.isFocused = false,
+    this.isMaximized = false,
+  });
+
+  final String hostId;
+  final double fontSize;
+  final bool isFocused;
+  final bool isMaximized;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'type': 'leaf',
+    'hostId': hostId,
+    'fontSize': fontSize,
+    if (isFocused) 'isFocused': true,
+    if (isMaximized) 'isMaximized': true,
+  };
+}
+
+class WorkspacePaneSplitSnapshot extends WorkspacePaneNodeSnapshot {
+  const WorkspacePaneSplitSnapshot({
+    required this.axis,
+    required this.ratio,
+    required this.first,
+    required this.second,
+  });
+
+  final Axis axis;
+  final double ratio;
+  final WorkspacePaneNodeSnapshot first;
+  final WorkspacePaneNodeSnapshot second;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'type': 'split',
+    'axis': axis == Axis.vertical ? 'vertical' : 'horizontal',
+    'ratio': ratio,
+    'first': first.toJson(),
+    'second': second.toJson(),
+  };
 }

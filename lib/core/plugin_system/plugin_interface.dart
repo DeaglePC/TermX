@@ -6,6 +6,7 @@ enum PluginPermission {
   sshExec('ssh:exec (后台命令执行通道)'),
   sshSftp('ssh:sftp (SFTP 文件读写通道)'),
   terminalIo('terminal:io (终端输入输出注入)'),
+  uiTerminalOverlay('ui:overlay (终端画布卡片贴片挂载)'),
   uiStatusBar('ui:statusbar (状态栏胶囊挂载)'),
   uiPanel('ui:panel (侧栏/底部抽屉挂载)'),
   localStorage('storage:local (独立沙盒配置存储)');
@@ -84,6 +85,9 @@ abstract class TermXPlugin extends ChangeNotifier {
   /// 插件初始化钩子
   Future<void> onInit() async {}
 
+  /// 当新终端会话创建或重连时触发（可用于挂载终端流式监听）
+  void onSessionAttached(SshSessionController session) {}
+
   /// 当活跃 SSH 会话切换或建立连接时触发
   void onActiveSessionChanged(SshSessionController? session) {}
 
@@ -101,6 +105,14 @@ abstract class TermXPlugin extends ChangeNotifier {
   Widget? buildPanelWidget(
     BuildContext context,
     PluginContext pluginContext,
+  ) =>
+      null;
+
+  /// [插槽 3] 终端窗格画布浮层微件 (如常见命令输出美化卡片、原文/卡片切换贴片)
+  Widget? buildTerminalOverlayWidget(
+    BuildContext context,
+    PluginContext pluginContext,
+    SshSessionController session,
   ) =>
       null;
 }

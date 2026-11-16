@@ -43,6 +43,104 @@ class DesktopNativeBridge {
   Future<String?> Function({String? initialDirectory})?
   debugPickDirectoryOverride;
 
+  @visibleForTesting
+  Future<double> Function(double opacity)? debugSetWindowOpacityOverride;
+
+  bool get supportsWindowOpacity =>
+      Platform.isWindows ||
+      Platform.isMacOS ||
+      debugSetWindowOpacityOverride != null;
+
+  /// 设置桌面端顶层窗口整体透明度（范围限制在 0.35 ~ 1.0，防止窗口彻底不可见）
+  Future<double> setWindowOpacity(double opacity) async {
+    final clamped = opacity.clamp(0.35, 1.0).toDouble();
+    if (debugSetWindowOpacityOverride != null) {
+      return debugSetWindowOpacityOverride!(clamped);
+    }
+    if (!Platform.isWindows && !Platform.isMacOS) {
+      return clamped;
+    }
+    try {
+      final res = await _channel.invokeMethod<num>('setWindowOpacity', {
+        'opacity': clamped,
+      });
+      return (res?.toDouble() ?? clamped).clamp(0.35, 1.0).toDouble();
+    } catch (_) {
+      return clamped;
+    }
+  }
+
+  /// 调用 Windows 原生身份验证（优先 Windows Hello 指纹 / 人脸识别 / PIN，未配置时回退 Windows 账户密码）
+  Future<({String status, String message})> authenticateWindowsUser({
+    required String reason,
+  }) async {
+    if (!Platform.isWindows) {
+      return (status: 'unavailable', message: '非 Windows 平台');
+    }
+    try {
+      final res = await _channel.invokeMapMethod<String, dynamic>(
+        'authenticateUser',
+        {'reason': reason},
+      );
+      if (res == null) {
+        return (status: 'failed', message: '系统身份验证未返回结果');
+      }
+      final status = (res['status'] as String?) ?? 'failed';
+      final message = (res['message'] as String?) ?? '';
+      return (status: status, message: message);
+    } on MissingPluginException {
+      return _fallbackAuthenticatePowerShell(reason: reason);
+    } on PlatformException catch (e) {
+      if (e.code == 'MissingPluginException') {
+        return _fallbackAuthenticatePowerShell(reason: reason);
+      }
+      return (status: 'failed', message: e.message ?? '系统身份验证调用失败');
+    } catch (_) {
+      return _fallbackAuthenticatePowerShell(reason: reason);
+    }
+  }
+
+  Future<({String status, String message})> _fallbackAuthenticatePowerShell({
+    required String reason,
+  }) async {
+    try {
+      final safeReason = reason.replaceAll("'", "''");
+      final script =
+          r'[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; '
+          r'$null = [Windows.Security.Credentials.UI.UserConsentVerifier, Windows.Security.Credentials.UI, ContentType = WindowsRuntime]; '
+          r'$asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq "AsTask" -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq "IAsyncOperation`1" })[0]; '
+          r'$availOp = [Windows.Security.Credentials.UI.UserConsentVerifier]::CheckAvailabilityAsync(); '
+          r'$availTask = $asTask.MakeGenericMethod([Windows.Security.Credentials.UI.UserConsentVerifierAvailability]).Invoke($null, @($availOp)); '
+          r'$avail = $availTask.GetAwaiter().GetResult(); '
+          r'if ($avail -eq "Available" -or $avail -eq "DeviceBusy") { '
+          "\$verOp = [Windows.Security.Credentials.UI.UserConsentVerifier]::RequestVerificationAsync('$safeReason'); "
+          r'$verTask = $asTask.MakeGenericMethod([Windows.Security.Credentials.UI.UserConsentVerificationResult]).Invoke($null, @($verOp)); '
+          r'$ver = $verTask.GetAwaiter().GetResult(); '
+          r'if ($ver -eq "Verified") { Write-Output "authenticated" } '
+          r'elseif ($ver -eq "Canceled") { Write-Output "canceled" } '
+          r'else { Write-Output "failed" } '
+          r'} else { Write-Output "unavailable" }';
+      final proc = await Process.run('powershell', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        script,
+      ]);
+      final out = (proc.stdout as String).trim().split(RegExp(r'\r?\n')).last;
+      return switch (out) {
+        'authenticated' => (status: 'authenticated', message: ''),
+        'canceled' => (status: 'canceled', message: '已取消身份验证'),
+        'unavailable' => (
+          status: 'unavailable',
+          message: '请重启 TermX 客户端以启用 Windows 账户密码回退验证，或在系统设置中开启 Windows Hello',
+        ),
+        _ => (status: 'failed', message: '系统身份验证未通过'),
+      };
+    } catch (_) {
+      return (status: 'failed', message: '无法唤起 Windows Hello 身份验证');
+    }
+  }
+
   bool get supportsNativeDialogs =>
       Platform.isWindows ||
       debugSaveFileOverride != null ||

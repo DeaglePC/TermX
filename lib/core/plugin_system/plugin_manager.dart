@@ -69,11 +69,40 @@ class PluginManager extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 通知所有已注册插件有新会话挂载
+  void notifySessionAttached(SshSessionController session) {
+    for (final plugin in _plugins.values) {
+      plugin.onSessionAttached(session);
+    }
+  }
+
   /// 广播当前活跃 SSH 会话变更给所有已启用插件
   void notifyActiveSessionChanged(SshSessionController? session) {
     for (final plugin in enabledPlugins) {
       plugin.onActiveSessionChanged(session);
     }
+  }
+
+  /// 构建指定终端窗格上由已启用插件提供的画布贴片浮层
+  Widget? buildTerminalOverlay(
+    BuildContext context,
+    PluginContext pluginContext,
+    SshSessionController session,
+  ) {
+    final overlays = <Widget>[];
+    for (final plugin in enabledPlugins) {
+      final w = plugin.buildTerminalOverlayWidget(
+        context,
+        pluginContext,
+        session,
+      );
+      if (w != null) {
+        overlays.add(w);
+      }
+    }
+    if (overlays.isEmpty) return null;
+    if (overlays.length == 1) return overlays.first;
+    return Stack(fit: StackFit.expand, children: overlays);
   }
 
   @override

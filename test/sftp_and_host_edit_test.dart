@@ -219,6 +219,25 @@ void main() {
       expect(plugin.currentPath, '/home/dpc');
       expect(find.text('projects'), findsOneWidget);
       expect(find.text('.bashrc'), findsOneWidget);
+      expect(find.text('上传 / 拖入文件'), findsOneWidget);
+      expect(find.text('新建文件'), findsOneWidget);
+      expect(find.text('新建目录'), findsOneWidget);
+
+      // Verify PC click targets on SFTP action & sort buttons are >= 30px tall
+      expect(
+        tester.getSize(find.ancestor(
+          of: find.text('新建文件'),
+          matching: find.byType(InkWell),
+        ).first).height,
+        greaterThanOrEqualTo(34),
+      );
+      expect(
+        tester.getSize(find.ancestor(
+          of: find.text('大小'),
+          matching: find.byType(InkWell),
+        ).first).height,
+        greaterThanOrEqualTo(30),
+      );
 
       // Navigate up: /home/dpc -> /home -> /
       await plugin.navigateUp();
@@ -283,12 +302,14 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('编辑 SSH 服务器会话'), findsOneWidget);
+      expect(find.text('主机别名'), findsOneWidget);
+      expect(find.text('登录用户名 (Username)'), findsOneWidget);
 
       // Change alias from Mix to Mix-NAS and username from dpc to ubuntu
-      final aliasField = find.widgetWithText(TextField, '主机别名');
+      final aliasField = find.byKey(const Key('host_form_alias_input'));
       await tester.enterText(aliasField, 'Mix-NAS');
 
-      final userField = find.widgetWithText(TextField, '登录用户名 (Username)');
+      final userField = find.byKey(const Key('host_form_user_input'));
       await tester.enterText(userField, 'ubuntu');
 
       await tester.tap(find.text('保存修改'));

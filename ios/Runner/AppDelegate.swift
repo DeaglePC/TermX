@@ -1,4 +1,5 @@
 import Flutter
+import LocalAuthentication
 import UIKit
 import Security
 
@@ -35,9 +36,33 @@ import Security
       case "delete":
         let status = self.deleteKeychain(key: key, synchronizable: sync)
         result(status == errSecSuccess || status == errSecItemNotFound)
+      case "authenticate":
+        let reason = args["reason"] as? String ?? "请验证身份以查看已保存的登录密码"
+        self.authenticateDeviceOwner(reason: reason, result: result)
       default:
         result(FlutterMethodNotImplemented)
       }
+    }
+  }
+
+  private func authenticateDeviceOwner(reason: String, result: @escaping FlutterResult) {
+    let context = LAContext()
+    var authError: NSError?
+    if context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) {
+      context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { success, evalError in
+        DispatchQueue.main.async {
+          if success {
+            result(["status": "authenticated", "message": ""])
+          } else if let laErr = evalError as? LAError,
+                    laErr.code == .userCancel || laErr.code == .systemCancel || laErr.code == .appCancel {
+            result(["status": "canceled", "message": "已取消身份验证"])
+          } else {
+            result(["status": "failed", "message": evalError?.localizedDescription ?? "身份验证未通过"])
+          }
+        }
+      }
+    } else {
+      result(["status": "unavailable", "message": authError?.localizedDescription ?? "当前设备未配置 Face ID / Touch ID 或锁屏密码"])
     }
   }
 

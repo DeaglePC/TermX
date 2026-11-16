@@ -1,25 +1,44 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
-
-import 'linux_telemetry.dart';
 
 import 'package:flutter/material.dart';
 
 import '../../core/plugin_system/plugin_interface.dart';
 import '../../core/ssh/ssh_session_controller.dart';
 import '../../core/theme/ui_tokens.dart';
+import 'linux_telemetry.dart';
+import 'local_host_telemetry.dart';
+
+enum ProcessSortBy {
+  cpu('CPU'),
+  memory('内存'),
+  disk('磁盘'),
+  network('网络');
+
+  final String label;
+  const ProcessSortBy(this.label);
+}
 
 class ProcessMetric {
   final int pid;
   final String command;
   final double cpuPercent;
   final double memPercent;
+  final double? memMb;
+  final double diskKbps;
+  final double netKbps;
+  final int netConns;
 
   const ProcessMetric({
     required this.pid,
     required this.command,
     required this.cpuPercent,
     required this.memPercent,
+    this.memMb,
+    this.diskKbps = 0.0,
+    this.netKbps = 0.0,
+    this.netConns = 0,
   });
 }
 
@@ -74,6 +93,7 @@ class ServerLoadSnapshot {
 
 class _ServerTelemetryState {
   LinuxTelemetrySampler sampler = LinuxTelemetrySampler();
+  LocalHostTelemetrySampler localSampler = LocalHostTelemetrySampler();
   ServerLoadSnapshot snapshot;
   List<double> cpuHistory;
   List<double> netDownHistory;
@@ -106,12 +126,12 @@ class _ServerTelemetryState {
     final primary = primarySession;
     if (primary != null &&
         !primary.isDisposed &&
-        !primary.isLocalSession &&
-        primary.state == SessionConnectionState.connected) {
+        (primary.isLocalSession ||
+            primary.state == SessionConnectionState.connected)) {
       return primary;
     }
     for (final candidate in knownSessions.toList().reversed) {
-      if (!candidate.isLocalSession &&
+      if (candidate.isLocalSession ||
           candidate.state == SessionConnectionState.connected) {
         return candidate;
       }
@@ -120,10 +140,19 @@ class _ServerTelemetryState {
   }
 }
 
-/// [核心插件 1] 服务器负载实时监控插件 (`plugin.server_monitor`)
-/// 复用当前活跃 SSH 会话的独立 Exec 通道采集 CPU、内存、磁盘、网卡流量与 Top 进程
+/// [核心插件 1] 本机与服务器负载实时监控插件 (`plugin.server_monitor`)
+/// - 本地 PowerShell / 本地终端会话：零子进程开销实时采集本机 CPU、物理内存、磁盘、网卡流量与活跃进程
+/// - 远端 SSH 会话：复用独立 Exec 通道实时采集远端服务器资源与活跃进程
+/// - 活跃进程支持按「CPU / 内存 / 磁盘 / 网络」四维升降序实时排序
 class ServerMonitorPlugin extends TermXPlugin {
   static const String pluginId = 'plugin.server_monitor';
+  static const String _localHostKey = '__local_host__';
+
+  ServerMonitorPlugin({this.localSamplerOverride});
+
+  /// 供单元测试注入确定性的本地资源采样回调
+  @visibleForTesting
+  final Future<LinuxTelemetry> Function(Duration elapsed)? localSamplerOverride;
 
   Timer? _pollTimer;
   static const refreshInterval = Duration(seconds: 1);
@@ -134,6 +163,22 @@ class ServerMonitorPlugin extends TermXPlugin {
   String? _currentServerKey;
   final Map<String, _ServerTelemetryState> _states = {};
   final Random _rng = Random();
+
+  ProcessSortBy _processSortBy = ProcessSortBy.cpu;
+  bool _processSortDescending = true;
+
+  ProcessSortBy get processSortBy => _processSortBy;
+  bool get processSortDescending => _processSortDescending;
+
+  void setProcessSort(ProcessSortBy sortBy) {
+    if (_processSortBy == sortBy) {
+      _processSortDescending = !_processSortDescending;
+    } else {
+      _processSortBy = sortBy;
+      _processSortDescending = true;
+    }
+    notifyListeners();
+  }
 
   static const _emptySnapshot = ServerLoadSnapshot(
     cpuTotalPercent: 0,
@@ -149,6 +194,7 @@ class ServerMonitorPlugin extends TermXPlugin {
     disks: [],
     topProcesses: [],
   );
+
   static const _demoSnapshot = ServerLoadSnapshot(
     cpuTotalPercent: 21.4,
     perCorePercents: [28.0, 19.5, 31.0, 14.2, 22.8, 17.0, 25.4, 13.5],
@@ -180,30 +226,47 @@ class ServerMonitorPlugin extends TermXPlugin {
         command: 'nginx: worker process',
         cpuPercent: 8.4,
         memPercent: 3.2,
+        memMb: 524.0,
+        diskKbps: 18.0,
+        netKbps: 1120.0,
+        netConns: 48,
       ),
       ProcessMetric(
         pid: 2190,
         command: 'postgres: walwriter',
         cpuPercent: 5.1,
         memPercent: 18.6,
+        memMb: 3047.0,
+        diskKbps: 2480.0,
+        netKbps: 145.0,
+        netConns: 14,
       ),
       ProcessMetric(
         pid: 1884,
         command: 'redis-server *:6379',
         cpuPercent: 3.8,
         memPercent: 9.4,
+        memMb: 1540.0,
+        diskKbps: 64.0,
+        netKbps: 380.0,
+        netConns: 26,
       ),
       ProcessMetric(
         pid: 3412,
         command: 'dockerd --containerd',
         cpuPercent: 2.2,
         memPercent: 6.1,
+        memMb: 999.0,
+        diskKbps: 512.0,
+        netKbps: 42.0,
+        netConns: 6,
       ),
     ],
   );
 
   static String? _serverKey(SshSessionController? session) {
-    if (session == null || session.isLocalSession) return null;
+    if (session == null) return null;
+    if (session.isLocalSession) return _localHostKey;
     final h = session.host;
     return '${session.isDemoMode}|${h.authMethod.name}|${h.id}|${h.username}@${h.host}:${h.port}|${h.jumpHostId ?? ''}';
   }
@@ -227,10 +290,10 @@ class ServerMonitorPlugin extends TermXPlugin {
   PluginManifest get manifest => const PluginManifest(
     id: pluginId,
     name: '服务器负载监控',
-    version: '1.2.0',
+    version: '1.3.0',
     author: 'TermX Core Team',
     description:
-        '无需在远端安装 Agent，通过 SSH 独立 Exec 通道实时监控服务器 CPU、内存、磁盘、网络吞吐与 Top 进程。',
+        '实时监控本地主机（Windows PowerShell / Unix）与远端 SSH 服务器的 CPU、物理内存、磁盘、网络吞吐及活跃进程四维排行。',
     icon: Icons.monitor_heart_outlined,
     accentColor: Color(0xFF4ADE80),
     permissions: [
@@ -270,14 +333,14 @@ class ServerMonitorPlugin extends TermXPlugin {
     state.attachSession(session);
 
     if (prevKey != nextKey) {
-      state.hasFreshProcessSample = session.isDemoMode;
+      state.hasFreshProcessSample =
+          session.isDemoMode || state.snapshot.memTotalGb > 0;
       notifyListeners();
       _pollOnce();
       return;
     }
 
-    // 同一台服务器（例如切换分屏窗格、新建分屏或刚完成重连）：
-    // 保留现有快照、趋势曲线与采样基线，避免右侧负载面板闪烁或归零。
+    // 同一台服务器或本机不同分屏窗格切换：保留快照、趋势曲线与计数器基线，无闪烁衔接
     if (state.snapshot.memTotalGb <= 0 || state.samplingError != null) {
       _pollOnce();
     }
@@ -293,7 +356,6 @@ class ServerMonitorPlugin extends TermXPlugin {
 
   Future<void> _pollOnce() async {
     if (_unloaded) return;
-    // Keep an already-running timer in sync when the interval changes.
     if (_scheduledInterval != refreshInterval) _startPolling();
     final key = _currentServerKey;
     if (key == null) return;
@@ -302,6 +364,31 @@ class ServerMonitorPlugin extends TermXPlugin {
     final session = state.pollableSession;
     if (session == null) return;
 
+    // 1. 本机 PowerShell / 本地终端会话采样
+    if (session.isLocalSession) {
+      state.pollInFlight = true;
+      try {
+        final elapsed = _sampleClock.elapsed;
+        final sample = localSamplerOverride != null
+            ? await localSamplerOverride!(elapsed)
+            : await state.localSampler.sample(elapsed);
+        if (_unloaded || _currentServerKey != key) return;
+        _applyLinuxTelemetry(state, sample);
+        state.samplingError = null;
+        state.hasFreshProcessSample = true;
+        notifyListeners();
+      } catch (_) {
+        if (!_unloaded && _currentServerKey == key && !session.isDisposed) {
+          state.samplingError = '本机资源采样失败，当前显示上次成功的数据，稍后自动重试。';
+          notifyListeners();
+        }
+      } finally {
+        state.pollInFlight = false;
+      }
+      return;
+    }
+
+    // 2. 远端真实 SSH 会话采样
     if (!session.isDemoMode) {
       state.pollInFlight = true;
       try {
@@ -325,7 +412,7 @@ class ServerMonitorPlugin extends TermXPlugin {
       return;
     }
 
-    // 仿真平滑波动数据
+    // 3. 演示沙盒平滑波动数据
     final prev = state.snapshot;
     final delta = (_rng.nextDouble() - 0.48) * 7.5;
     final nextCpu = (prev.cpuTotalPercent + delta).clamp(6.0, 94.0);
@@ -396,10 +483,88 @@ class ServerMonitorPlugin extends TermXPlugin {
               command: process.command,
               cpuPercent: process.cpuPercent,
               memPercent: process.memPercent,
+              memMb: process.memMb,
+              diskKbps: process.diskKbps,
+              netKbps: process.netKbps,
+              netConns: process.netConns,
             ),
           )
           .toList(),
     );
+  }
+
+  List<ProcessMetric> _sortedTopProcesses(
+    List<ProcessMetric> all, {
+    int limit = 15,
+  }) {
+    if (all.isEmpty) return const [];
+    final sorted = List<ProcessMetric>.of(all);
+    final dir = _processSortDescending ? -1 : 1;
+
+    sorted.sort((a, b) {
+      int cmp;
+      switch (_processSortBy) {
+        case ProcessSortBy.cpu:
+          cmp = a.cpuPercent.compareTo(b.cpuPercent);
+          if (cmp == 0) {
+            cmp = (a.memMb ?? a.memPercent).compareTo(b.memMb ?? b.memPercent);
+          }
+        case ProcessSortBy.memory:
+          cmp = (a.memMb ?? a.memPercent).compareTo(b.memMb ?? b.memPercent);
+          if (cmp == 0) {
+            cmp = a.cpuPercent.compareTo(b.cpuPercent);
+          }
+        case ProcessSortBy.disk:
+          cmp = a.diskKbps.compareTo(b.diskKbps);
+          if (cmp == 0) {
+            cmp = a.cpuPercent.compareTo(b.cpuPercent);
+          }
+        case ProcessSortBy.network:
+          cmp = a.netKbps.compareTo(b.netKbps);
+          if (cmp == 0) {
+            cmp = a.netConns.compareTo(b.netConns);
+          }
+          if (cmp == 0) {
+            cmp = a.cpuPercent.compareTo(b.cpuPercent);
+          }
+      }
+      if (cmp != 0) return cmp * dir;
+      return a.pid.compareTo(b.pid);
+    });
+
+    return sorted.take(limit).toList();
+  }
+
+  static String _formatRateKbps(double kbps) {
+    if (kbps < 0.05) return '0 KB/s';
+    if (kbps < 1024.0) {
+      return kbps >= 10.0
+          ? '${kbps.toStringAsFixed(0)} KB/s'
+          : '${kbps.toStringAsFixed(1)} KB/s';
+    }
+    return '${(kbps / 1024.0).toStringAsFixed(1)} MB/s';
+  }
+
+  static String _formatMemMetric(ProcessMetric p) {
+    final mb = p.memMb;
+    if (mb == null) {
+      return '${p.memPercent.toStringAsFixed(1)}%';
+    }
+    if (mb >= 1024.0) {
+      return '${(mb / 1024.0).toStringAsFixed(1)} GB (${p.memPercent.toStringAsFixed(1)}%)';
+    }
+    return '${mb.toStringAsFixed(mb >= 10 ? 0 : 1)} MB (${p.memPercent.toStringAsFixed(1)}%)';
+  }
+
+  static String _formatNetMetric(ProcessMetric p) {
+    if (p.netKbps >= 0.05) {
+      final rate = _formatRateKbps(p.netKbps);
+      return p.netConns > 0 ? '$rate (${p.netConns})' : rate;
+    }
+    if (p.netConns > 0) {
+      return '0 KB/s (${p.netConns}连接)';
+    }
+    return '0 KB/s';
   }
 
   @override
@@ -414,17 +579,19 @@ class ServerMonitorPlugin extends TermXPlugin {
     PluginContext pluginContext,
   ) {
     final activeSession = pluginContext.activeSession;
-    if (activeSession?.isLocalSession == true) {
-      return const SizedBox.shrink();
-    }
     return ListenableBuilder(
       listenable: this,
       builder: (context, _) {
         final targetSession = activeSession ?? _currentSession;
+        if (targetSession == null) {
+          return const SizedBox.shrink();
+        }
         final targetKey = _serverKey(targetSession);
         final state = targetKey != null ? _states[targetKey] : null;
-        final s = state?.snapshot ??
-            (targetSession?.isDemoMode == true ? _demoSnapshot : _emptySnapshot);
+        final s =
+            state?.snapshot ??
+            (targetSession.isDemoMode ? _demoSnapshot : _emptySnapshot);
+        final isLocal = targetSession.isLocalSession;
         final cpuColor = s.cpuTotalPercent > 85
             ? TxColors.danger
             : s.cpuTotalPercent > 65
@@ -436,43 +603,64 @@ class ServerMonitorPlugin extends TermXPlugin {
           onTap: () => pluginContext.requestOpenPanel(pluginId),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  'CPU ${s.cpuTotalPercent.toStringAsFixed(0)}%',
-                  style: TextStyle(
-                    fontSize: 10.5,
-                    fontFamily: TxColors.monoFamily,
-                    fontWeight: FontWeight.w600,
-                    color: cpuColor,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (isLocal) ...[
+                    const Text(
+                      '本机',
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w600,
+                        color: TxColors.accent,
+                      ),
+                    ),
+                    const Text(
+                      '  ·  ',
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        color: TxColors.textMuted,
+                      ),
+                    ),
+                  ],
+                  Text(
+                    'CPU ${s.cpuTotalPercent.toStringAsFixed(0)}%',
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      fontFamily: TxColors.monoFamily,
+                      fontWeight: FontWeight.w600,
+                      color: cpuColor,
+                    ),
                   ),
-                ),
-                const Text(
-                  '  ·  ',
-                  style: TextStyle(fontSize: 10.5, color: TxColors.textMuted),
-                ),
-                Text(
-                  'RAM ${s.memUsedGb.toStringAsFixed(1)}/${s.memTotalGb.toStringAsFixed(0)}G',
-                  style: const TextStyle(
-                    fontSize: 10.5,
-                    fontFamily: TxColors.monoFamily,
-                    color: TxColors.textSecondary,
+                  const Text(
+                    '  ·  ',
+                    style: TextStyle(fontSize: 10.5, color: TxColors.textMuted),
                   ),
-                ),
-                const Text(
-                  '  ·  ',
-                  style: TextStyle(fontSize: 10.5, color: TxColors.textMuted),
-                ),
-                Text(
-                  '↓${(s.netDownKbps / 1024).toStringAsFixed(2)}M ↑${(s.netUpKbps / 1024).toStringAsFixed(2)}M',
-                  style: const TextStyle(
-                    fontSize: 10.5,
-                    fontFamily: TxColors.monoFamily,
-                    color: TxColors.textMuted,
+                  Text(
+                    'RAM ${s.memUsedGb.toStringAsFixed(1)}/${s.memTotalGb.toStringAsFixed(0)}G',
+                    style: const TextStyle(
+                      fontSize: 10.5,
+                      fontFamily: TxColors.monoFamily,
+                      color: TxColors.textSecondary,
+                    ),
                   ),
-                ),
-              ],
+                  const Text(
+                    '  ·  ',
+                    style: TextStyle(fontSize: 10.5, color: TxColors.textMuted),
+                  ),
+                  Text(
+                    '↓${(s.netDownKbps / 1024).toStringAsFixed(2)}M ↑${(s.netUpKbps / 1024).toStringAsFixed(2)}M',
+                    style: const TextStyle(
+                      fontSize: 10.5,
+                      fontFamily: TxColors.monoFamily,
+                      color: TxColors.textMuted,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         );
@@ -483,23 +671,27 @@ class ServerMonitorPlugin extends TermXPlugin {
   @override
   Widget buildPanelWidget(BuildContext context, PluginContext pluginContext) {
     final activeSession = pluginContext.activeSession;
-    if (activeSession?.isLocalSession == true) {
-      return localSessionNotice();
-    }
     return ListenableBuilder(
       listenable: this,
       builder: (context, _) {
         final targetSession = activeSession ?? _currentSession;
+        final isLocal = targetSession?.isLocalSession == true;
+        final isLocalWindows = isLocal && Platform.isWindows;
         final targetKey = _serverKey(targetSession);
         final state = targetKey != null ? _states[targetKey] : null;
-        final s = state?.snapshot ??
-            (targetSession?.isDemoMode == true ? _demoSnapshot : _emptySnapshot);
+        final s =
+            state?.snapshot ??
+            (targetSession?.isDemoMode == true
+                ? _demoSnapshot
+                : _emptySnapshot);
         final samplingError = state?.samplingError;
-        final cpuValues = state?.cpuHistory ??
+        final cpuValues =
+            state?.cpuHistory ??
             (targetSession?.isDemoMode == true
                 ? List<double>.unmodifiable(List<double>.filled(32, 18.0))
                 : const <double>[]);
-        final netValues = state?.netDownHistory ??
+        final netValues =
+            state?.netDownHistory ??
             (targetSession?.isDemoMode == true
                 ? List<double>.unmodifiable(List<double>.filled(32, 320.0))
                 : const <double>[]);
@@ -508,7 +700,8 @@ class ServerMonitorPlugin extends TermXPlugin {
             child: Padding(
               padding: const EdgeInsets.all(20),
               child: Text(
-                samplingError ?? '正在读取服务器监控数据…',
+                samplingError ??
+                    (isLocal ? '正在读取本机监控数据…' : '正在读取服务器监控数据…'),
                 textAlign: TextAlign.center,
                 style: const TextStyle(
                   fontSize: 12,
@@ -523,10 +716,59 @@ class ServerMonitorPlugin extends TermXPlugin {
             : s.cpuTotalPercent > 65
             ? TxColors.warning
             : TxColors.textPrimary;
+        final netPeakKbps = netValues.isEmpty
+            ? 2500.0
+            : max(1024.0, netValues.reduce(max) * 1.18);
+        final sortedProcesses = _sortedTopProcesses(s.topProcesses);
 
         return ListView(
           padding: const EdgeInsets.all(12),
           children: [
+            if (isLocal)
+              Container(
+                margin: const EdgeInsets.only(bottom: 10),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: TxColors.accentSoft,
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(
+                    color: TxColors.accent.withValues(alpha: 0.35),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.computer_rounded,
+                      size: 14,
+                      color: TxColors.accent,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        isLocalWindows
+                            ? '本机资源监控 (Windows PowerShell)'
+                            : '本机资源监控 (Local Shell)',
+                        style: const TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: TxColors.textPrimary,
+                        ),
+                      ),
+                    ),
+                    const Text(
+                      '1s 实时',
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        fontFamily: TxColors.monoFamily,
+                        color: TxColors.accent,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             if (samplingError != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: 10),
@@ -718,7 +960,7 @@ class ServerMonitorPlugin extends TermXPlugin {
               icon: Icons.swap_vert_rounded,
               title: '网络吞吐',
               trailing:
-                  '↓${s.netDownKbps.toStringAsFixed(0)} KB/s  ↑${s.netUpKbps.toStringAsFixed(0)} KB/s',
+                  '↓${_formatRateKbps(s.netDownKbps)}  ↑${_formatRateKbps(s.netUpKbps)}',
             ),
             const SizedBox(height: 6),
             Container(
@@ -731,7 +973,7 @@ class ServerMonitorPlugin extends TermXPlugin {
                   painter: _SparklinePainter(
                     values: netValues,
                     lineColor: const Color(0xFF4AB8C4),
-                    maxVal: 2500.0,
+                    maxVal: netPeakKbps,
                   ),
                 ),
               ),
@@ -740,7 +982,9 @@ class ServerMonitorPlugin extends TermXPlugin {
             _buildSectionHeader(
               icon: Icons.storage_rounded,
               title: '磁盘存储',
-              trailing: '${s.disks.length} 个挂载点',
+              trailing: isLocal
+                  ? '${s.disks.length} 个磁盘分区'
+                  : '${s.disks.length} 个挂载点',
             ),
             const SizedBox(height: 6),
             ...s.disks.map((d) {
@@ -800,100 +1044,249 @@ class ServerMonitorPlugin extends TermXPlugin {
             _buildSectionHeader(
               icon: Icons.layers_outlined,
               title: '活跃进程',
-              trailing: 'SIGTERM',
+              trailing: isLocalWindows ? 'Stop-Process' : 'SIGTERM',
             ),
+            const SizedBox(height: 6),
+            _buildProcessSortToolbar(),
             const SizedBox(height: 6),
             Container(
               decoration: _cardDecoration(),
               child: Column(
                 children: [
-                  for (var i = 0; i < s.topProcesses.length; i++) ...[
+                  for (var i = 0; i < sortedProcesses.length; i++) ...[
                     if (i > 0)
                       const Divider(height: 1, color: TxColors.borderSubtle),
                     Builder(
                       builder: (context) {
-                        final p = s.topProcesses[i];
+                        final p = sortedProcesses[i];
+                        final stopCmd = isLocalWindows
+                            ? 'Stop-Process -Id ${p.pid}'
+                            : 'kill -15 ${p.pid}';
                         return Padding(
-                          padding: const EdgeInsets.fromLTRB(10, 7, 4, 7),
+                          padding: const EdgeInsets.fromLTRB(11, 8, 6, 8),
                           child: Row(
                             children: [
                               Expanded(
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    Text(
-                                      p.command,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(
-                                        fontSize: 11.5,
-                                        fontFamily: TxColors.monoFamily,
-                                        color: TxColors.textPrimary,
-                                      ),
+                                    Row(
+                                      children: [
+                                        Expanded(
+                                          child: Text(
+                                            p.command,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              fontSize: 12.5,
+                                              fontFamily: TxColors.monoFamily,
+                                              fontWeight: FontWeight.w500,
+                                              color: TxColors.textPrimary,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 6),
+                                        Text(
+                                          'PID ${p.pid}',
+                                          style: const TextStyle(
+                                            fontSize: 11.5,
+                                            fontFamily: TxColors.monoFamily,
+                                            color: TxColors.textMuted,
+                                          ),
+                                        ),
+                                      ],
                                     ),
-                                    const SizedBox(height: 2),
-                                    Text(
-                                      'PID ${p.pid}  ·  CPU ${p.cpuPercent.toStringAsFixed(1)}%  ·  MEM ${p.memPercent.toStringAsFixed(1)}%',
-                                      style: const TextStyle(
-                                        fontSize: 10.5,
-                                        fontFamily: TxColors.monoFamily,
-                                        color: TxColors.textMuted,
-                                      ),
+                                    const SizedBox(height: 4),
+                                    Wrap(
+                                      spacing: 9,
+                                      runSpacing: 3,
+                                      children: [
+                                        _buildProcMetricSpan(
+                                          'CPU ${p.cpuPercent.toStringAsFixed(1)}%',
+                                          highlighted:
+                                              _processSortBy ==
+                                              ProcessSortBy.cpu,
+                                        ),
+                                        _buildProcMetricSpan(
+                                          '内存 ${_formatMemMetric(p)}',
+                                          highlighted:
+                                              _processSortBy ==
+                                              ProcessSortBy.memory,
+                                        ),
+                                        _buildProcMetricSpan(
+                                          '磁盘 ${_formatRateKbps(p.diskKbps)}',
+                                          highlighted:
+                                              _processSortBy ==
+                                              ProcessSortBy.disk,
+                                        ),
+                                        _buildProcMetricSpan(
+                                          '网络 ${_formatNetMetric(p)}',
+                                          highlighted:
+                                              _processSortBy ==
+                                              ProcessSortBy.network,
+                                        ),
+                                      ],
                                     ),
                                   ],
                                 ),
                               ),
-                              IconButton(
-                                visualDensity: VisualDensity.compact,
-                                constraints: const BoxConstraints(
-                                  minWidth: 28,
-                                  minHeight: 28,
+                              SizedBox(
+                                width: 32,
+                                height: 32,
+                                child: IconButton(
+                                  padding: EdgeInsets.zero,
+                                  style: IconButton.styleFrom(
+                                    hoverColor: TxColors.bgHover,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(6),
+                                    ),
+                                  ),
+                                  tooltip: '结束进程 ($stopCmd)',
+                                  icon: const Icon(
+                                    Icons.stop_circle_outlined,
+                                    size: 17,
+                                    color: TxColors.iconDefault,
+                                  ),
+                                    onPressed: () {
+                                      final currentActive =
+                                          pluginContext.activeSession;
+                                      final activeKey = _serverKey(
+                                        currentActive,
+                                      );
+                                      if (currentActive == null ||
+                                          currentActive.isDisposed ||
+                                          currentActive.state !=
+                                              SessionConnectionState
+                                                  .connected ||
+                                          activeKey == null ||
+                                          activeKey != targetKey ||
+                                          activeKey != _currentServerKey ||
+                                          state == null ||
+                                          !state.hasFreshProcessSample) {
+                                        pluginContext.showToast(
+                                          '会话已切换或断开，请等待最新进程列表后重试',
+                                        );
+                                        return;
+                                      }
+                                      pluginContext.writeToTerminal(stopCmd);
+                                      pluginContext.showToast(
+                                        '已向终端注入命令: $stopCmd',
+                                      );
+                                    },
+                                  ),
                                 ),
-                                padding: EdgeInsets.zero,
-                                tooltip: '结束进程 (kill -15 ${p.pid})',
-                                icon: const Icon(
-                                  Icons.stop_circle_outlined,
-                                  size: 15,
-                                  color: TxColors.textMuted,
-                                ),
-                                onPressed: () {
-                                  final currentActive =
-                                      pluginContext.activeSession;
-                                  final activeKey = _serverKey(currentActive);
-                                  if (currentActive == null ||
-                                      currentActive.isDisposed ||
-                                      currentActive.state !=
-                                          SessionConnectionState.connected ||
-                                      activeKey == null ||
-                                      activeKey != targetKey ||
-                                      activeKey != _currentServerKey ||
-                                      state == null ||
-                                      !state.hasFreshProcessSample) {
-                                    pluginContext.showToast(
-                                      '会话已切换或断开，请等待最新进程列表后重试',
-                                    );
-                                    return;
-                                  }
-                                  pluginContext.writeToTerminal(
-                                    'kill -15 ${p.pid}',
-                                  );
-                                  pluginContext.showToast(
-                                    '已向终端注入命令: kill -15 ${p.pid}',
-                                  );
-                                },
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          );
+        },
+      );
+    }
+
+  Widget _buildProcessSortToolbar() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 6),
+      decoration: BoxDecoration(
+        color: TxColors.bgPanel,
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: TxColors.borderSubtle),
+      ),
+      child: Row(
+        children: [
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 5),
+            child: Text(
+              '排序',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+                color: TxColors.textSecondary,
+              ),
+            ),
+          ),
+          const SizedBox(width: 2),
+          for (final dim in ProcessSortBy.values) ...[
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 2.5),
+                child: InkWell(
+                  key: ValueKey<String>('proc-sort-${dim.name}'),
+                  borderRadius: BorderRadius.circular(6),
+                  hoverColor: TxColors.bgHover,
+                  onTap: () => setProcessSort(dim),
+                  child: Container(
+                    height: 30,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: _processSortBy == dim
+                          ? TxColors.accentSoft
+                          : TxColors.bgChrome,
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(
+                        color: _processSortBy == dim
+                            ? TxColors.accent.withValues(alpha: 0.7)
+                            : TxColors.borderSubtle,
+                      ),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              dim.label,
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                fontWeight: _processSortBy == dim
+                                    ? FontWeight.w600
+                                    : FontWeight.w500,
+                                color: _processSortBy == dim
+                                    ? TxColors.textPrimary
+                                    : TxColors.textSecondary,
+                              ),
+                            ),
+                            if (_processSortBy == dim) ...[
+                              const SizedBox(width: 2),
+                              Icon(
+                                _processSortDescending
+                                    ? Icons.arrow_downward_rounded
+                                    : Icons.arrow_upward_rounded,
+                                size: 13.5,
+                                color: TxColors.accent,
                               ),
                             ],
-                          ),
-                        );
-                      },
+                          ],
+                        ),
+                      ),
                     ),
-                  ],
-                ],
+                  ),
+                ),
               ),
             ),
           ],
-        );
-      },
+        ],
+      ),
+    );
+  }
+
+  Widget _buildProcMetricSpan(String text, {required bool highlighted}) {
+    return Text(
+      text,
+      style: TextStyle(
+        fontSize: 11.5,
+        fontFamily: TxColors.monoFamily,
+        fontWeight: highlighted ? FontWeight.w600 : FontWeight.w400,
+        color: highlighted ? TxColors.accent : TxColors.textMuted,
+      ),
     );
   }
 
@@ -904,24 +1297,32 @@ class ServerMonitorPlugin extends TermXPlugin {
   }) {
     return Row(
       children: [
-        Icon(icon, size: 13.5, color: TxColors.textMuted),
+        Icon(icon, size: 15, color: TxColors.textSecondary),
         const SizedBox(width: 6),
         Expanded(
           child: Text(
             title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: const TextStyle(
-              fontSize: 11.5,
+              fontSize: 12.5,
               fontWeight: FontWeight.w600,
               color: TxColors.textSecondary,
             ),
           ),
         ),
-        Text(
-          trailing,
-          style: const TextStyle(
-            fontSize: 10.5,
-            fontFamily: TxColors.monoFamily,
-            color: TxColors.textMuted,
+        const SizedBox(width: 8),
+        Flexible(
+          child: Text(
+            trailing,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.right,
+            style: const TextStyle(
+              fontSize: 11.5,
+              fontFamily: TxColors.monoFamily,
+              color: TxColors.textMuted,
+            ),
           ),
         ),
       ],

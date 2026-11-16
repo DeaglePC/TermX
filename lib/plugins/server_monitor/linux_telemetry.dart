@@ -11,10 +11,23 @@ class LinuxDiskUsage {
 }
 
 class LinuxProcessUsage {
-  LinuxProcessUsage(this.pid, this.command, this.cpuPercent, this.memPercent);
+  LinuxProcessUsage(
+    this.pid,
+    this.command,
+    this.cpuPercent,
+    this.memPercent, {
+    this.memMb,
+    this.diskKbps = 0.0,
+    this.netKbps = 0.0,
+    this.netConns = 0,
+  });
   final int pid;
   final String command;
   final double cpuPercent, memPercent;
+  final double? memMb;
+  final double diskKbps;
+  final double netKbps;
+  final int netConns;
 }
 
 class LinuxTelemetry {
@@ -41,7 +54,61 @@ class LinuxTelemetrySampler {
   Map<String, List<int>> _cpus = {};
   Map<String, List<int>> _network = {};
   Map<int, List<int>> _processes = {};
+  Map<int, List<int>> _processIo = {};
+  Map<int, int> _processNetBytes = {};
   Duration? _time;
+
+  static List<LinuxProcessUsage> selectMultiDimensionTopProcesses(
+    List<LinuxProcessUsage> all, {
+    int perDimensionLimit = 15,
+  }) {
+    if (all.length <= perDimensionLimit) {
+      final copy = List<LinuxProcessUsage>.of(all);
+      copy.sort(_compareByCpuDesc);
+      return copy;
+    }
+
+    final selectedPids = <int>{};
+    final merged = <LinuxProcessUsage>[];
+
+    void pickTop(Comparator<LinuxProcessUsage> cmp) {
+      final sorted = List<LinuxProcessUsage>.of(all)..sort(cmp);
+      var count = 0;
+      for (final p in sorted) {
+        if (count >= perDimensionLimit) break;
+        count++;
+        if (selectedPids.add(p.pid)) {
+          merged.add(p);
+        }
+      }
+    }
+
+    pickTop(_compareByCpuDesc);
+    pickTop((a, b) {
+      final m = (b.memMb ?? b.memPercent).compareTo(a.memMb ?? a.memPercent);
+      return m != 0 ? m : _compareByCpuDesc(a, b);
+    });
+    pickTop((a, b) {
+      final d = b.diskKbps.compareTo(a.diskKbps);
+      return d != 0 ? d : _compareByCpuDesc(a, b);
+    });
+    pickTop((a, b) {
+      final n = b.netKbps.compareTo(a.netKbps);
+      if (n != 0) return n;
+      final c = b.netConns.compareTo(a.netConns);
+      return c != 0 ? c : _compareByCpuDesc(a, b);
+    });
+
+    merged.sort(_compareByCpuDesc);
+    return merged;
+  }
+
+  static int _compareByCpuDesc(LinuxProcessUsage a, LinuxProcessUsage b) {
+    final cpu = b.cpuPercent.compareTo(a.cpuPercent);
+    if (cpu != 0) return cpu;
+    final memory = b.memPercent.compareTo(a.memPercent);
+    return memory != 0 ? memory : a.pid.compareTo(b.pid);
+  }
 
   static const command = r'''
 PATH="$PATH:/usr/sbin:/sbin:/usr/bin:/bin"
@@ -57,6 +124,7 @@ if [ "$OS_KERNEL" = "Darwin" ]; then
   printf '\n[MAC_NET]\n'; netstat -ibn 2>/dev/null | awk '$3 ~ /^<Link#/ && NF >= 7 { print $1, $(NF-4), $(NF-1) }'
   printf '\n[DISK]\n'; LC_ALL=C df -Pk -l 2>/dev/null
   printf '\n[MAC_PROC]\n'; LC_ALL=C ps -Aceo pid=,pcpu=,pmem=,comm= -r 2>/dev/null
+  printf '\n[MAC_NETTOP]\n'; nettop -P -L 1 -x -J bytes_in,bytes_out 2>/dev/null
 else
   printf '\n[STAT]\n'; cat /proc/stat
   printf '\n[MEM]\n'; cat /proc/meminfo
@@ -80,6 +148,39 @@ else
     }
     exit
   }' /proc/[0-9]*/stat 2>/dev/null
+  printf '\n[PROC_IO]\n'
+  awk 'BEGIN {
+    for (i = 1; i < ARGC; i++) {
+      pid = ARGV[i]; sub(/^\/proc\//, "", pid); sub(/\/io$/, "", pid)
+      rb = 0; wb = 0; ok = 0
+      while ((getline line < ARGV[i]) > 0) {
+        if (line ~ /^read_bytes:/) { sub(/^read_bytes:[ \t]*/, "", line); rb = line + 0; ok = 1 }
+        else if (line ~ /^write_bytes:/) { sub(/^write_bytes:[ \t]*/, "", line); wb = line + 0; ok = 1 }
+      }
+      close(ARGV[i])
+      if (ok && (rb > 0 || wb > 0)) printf "%s\t%.0f\n", pid, rb + wb
+    }
+    exit
+  }' /proc/[0-9]*/io 2>/dev/null
+  printf '\n[PROC_NET]\n'
+  ss -tinp 2>/dev/null | awk '
+    /pid=[0-9]+/ {
+      curPid = $0; sub(/^.*pid=/, "", curPid); sub(/[^0-9].*$/, "", curPid)
+      if (curPid + 0 > 0) conns[curPid]++
+      next
+    }
+    curPid + 0 > 0 && (/bytes_acked:/ || /bytes_received:/ || /bytes_sent:/) {
+      s = $0; ba = 0; br = 0
+      if (match(s, /bytes_acked:[0-9]+/)) { t = substr(s, RSTART + 12, RLENGTH - 12); ba = t + 0 }
+      else if (match(s, /bytes_sent:[0-9]+/)) { t = substr(s, RSTART + 11, RLENGTH - 11); ba = t + 0 }
+      if (match(s, /bytes_received:[0-9]+/)) { t = substr(s, RSTART + 15, RLENGTH - 15); br = t + 0 }
+      bytes[curPid] += (ba + br)
+      curPid = 0
+    }
+    END {
+      for (p in conns) printf "%s\t%.0f\t%d\n", p, bytes[p] + 0, conns[p]
+    }
+  '
 fi
 ''';
 
@@ -89,7 +190,7 @@ fi
     for (final line in raw.split('\n')) {
       final text = line.trim();
       if (RegExp(
-        r'^\[(OS|STAT|MEM|NET|ROUTE|LOAD|DISK|PAGE|PROCESS|MAC_SYS|MAC_VM|MAC_ROUTE|MAC_NET|MAC_PROC)\]$',
+        r'^\[(OS|STAT|MEM|NET|ROUTE|LOAD|DISK|PAGE|PROCESS|PROC_IO|PROC_NET|MAC_SYS|MAC_VM|MAC_ROUTE|MAC_NET|MAC_PROC|MAC_NETTOP)\]$',
       ).hasMatch(text)) {
         section = text;
         sections[section] = [];
@@ -208,7 +309,34 @@ fi
     if (disks.isEmpty || pageSize <= 0 || !sections.containsKey('[PROCESS]')) {
       throw const FormatException('无法读取真实磁盘或进程数据');
     }
+    final rawProcIo = <int, int>{};
+    for (final line in sections['[PROC_IO]'] ?? const <String>[]) {
+      final parts = line.split('\t');
+      if (parts.length < 2) continue;
+      final pid = int.tryParse(parts[0]);
+      final bytes = int.tryParse(parts[1]);
+      if (pid != null && bytes != null) {
+        rawProcIo[pid] = bytes;
+      }
+    }
+
+    final rawProcNetBytes = <int, int>{};
+    final rawProcNetConns = <int, int>{};
+    for (final line in sections['[PROC_NET]'] ?? const <String>[]) {
+      final parts = line.split('\t');
+      if (parts.length < 3) continue;
+      final pid = int.tryParse(parts[0]);
+      final bytes = int.tryParse(parts[1]);
+      final conns = int.tryParse(parts[2]);
+      if (pid != null) {
+        if (bytes != null) rawProcNetBytes[pid] = bytes;
+        if (conns != null) rawProcNetConns[pid] = conns;
+      }
+    }
+
     final currentProcesses = <int, List<int>>{};
+    final currentProcessIo = <int, List<int>>{};
+    final currentProcessNet = <int, int>{};
     final processes = <LinuxProcessUsage>[];
     final totalTicks = cpus['cpu']!.fold(0, (a, b) => a + b);
     final previousTicks = _cpus['cpu']?.fold(0, (a, b) => a + b);
@@ -237,21 +365,48 @@ fi
         usage = (ticks - previous[1]) / deltaTicks * coreNames.length * 100;
       }
       currentProcesses[pid] = [start, ticks];
+
+      var diskKbps = 0.0;
+      final ioBytes = rawProcIo[pid];
+      if (ioBytes != null) {
+        final prevIo = _processIo[pid];
+        if (prevIo != null &&
+            prevIo[0] == start &&
+            seconds > 0 &&
+            ioBytes >= prevIo[1]) {
+          diskKbps = (ioBytes - prevIo[1]) / seconds / 1024.0;
+        }
+        currentProcessIo[pid] = [start, ioBytes];
+      }
+
+      var netKbps = 0.0;
+      final netBytes = rawProcNetBytes[pid];
+      if (netBytes != null) {
+        final prevNet = _processNetBytes[pid];
+        if (prevNet != null &&
+            previous != null &&
+            previous[0] == start &&
+            seconds > 0 &&
+            netBytes >= prevNet) {
+          netKbps = (netBytes - prevNet) / seconds / 1024.0;
+        }
+        currentProcessNet[pid] = netBytes;
+      }
+
+      final memBytes = rssPages * pageSize;
       processes.add(
         LinuxProcessUsage(
           pid,
           fields.sublist(4).join('\t'),
           usage,
-          (rssPages * pageSize / (total * 1024) * 100).clamp(0, 100),
+          (memBytes / (total * 1024) * 100).clamp(0, 100),
+          memMb: memBytes / 1048576.0,
+          diskKbps: diskKbps,
+          netKbps: netKbps,
+          netConns: rawProcNetConns[pid] ?? 0,
         ),
       );
     }
-    processes.sort((a, b) {
-      final cpu = b.cpuPercent.compareTo(a.cpuPercent);
-      if (cpu != 0) return cpu;
-      final memory = b.memPercent.compareTo(a.memPercent);
-      return memory != 0 ? memory : a.pid.compareTo(b.pid);
-    });
     if (processes.isEmpty) {
       throw const FormatException('无法读取真实进程列表');
     }
@@ -265,12 +420,14 @@ fi
       upKbps: seconds > 0 ? upBytes / seconds / 1024 : 0,
       downKbps: seconds > 0 ? downBytes / seconds / 1024 : 0,
       disks: disks,
-      processes: processes.take(15).toList(),
+      processes: selectMultiDimensionTopProcesses(processes),
     );
     _cpus = cpus;
     _network = network;
     _time = time;
     _processes = currentProcesses;
+    _processIo = currentProcessIo;
+    _processNetBytes = currentProcessNet;
     return result;
   }
 
@@ -473,8 +630,22 @@ fi
       );
     }
 
+    // 解析 macOS nettop 进程级网络吞吐（格式：process_name.pid,bytes_in,bytes_out）
+    final macNetBytes = <int, int>{};
+    for (final line in sections['[MAC_NETTOP]'] ?? const <String>[]) {
+      final m = RegExp(r'\.(\d+),(\d+),(\d+)').firstMatch(line);
+      if (m == null) continue;
+      final pid = int.tryParse(m.group(1)!);
+      final rx = int.tryParse(m.group(2)!);
+      final tx = int.tryParse(m.group(3)!);
+      if (pid != null && rx != null && tx != null) {
+        macNetBytes[pid] = (macNetBytes[pid] ?? 0) + rx + tx;
+      }
+    }
+
     // 进程与多核 CPU 负载计算
     final processes = <LinuxProcessUsage>[];
+    final currentProcessNet = <int, int>{};
     double sumPcpu = 0.0;
     final coreLoads = List<double>.filled(ncpu, 0.0);
 
@@ -507,16 +678,28 @@ fi
         remaining -= chunk;
       }
 
-      if (processes.length < 15) {
-        processes.add(
-          LinuxProcessUsage(
-            pid,
-            comm,
-            pcpu.clamp(0.0, ncpu * 100.0),
-            pmem.clamp(0.0, 100.0),
-          ),
-        );
+      var netKbps = 0.0;
+      final netTotal = macNetBytes[pid];
+      if (netTotal != null) {
+        final prevNet = _processNetBytes[pid];
+        if (prevNet != null && seconds > 0 && netTotal >= prevNet) {
+          netKbps = (netTotal - prevNet) / seconds / 1024.0;
+        }
+        currentProcessNet[pid] = netTotal;
       }
+
+      final clampedMem = pmem.clamp(0.0, 100.0);
+      processes.add(
+        LinuxProcessUsage(
+          pid,
+          comm,
+          pcpu.clamp(0.0, ncpu * 100.0),
+          clampedMem,
+          memMb: (totalBytes * (clampedMem / 100.0)) / 1048576.0,
+          netKbps: netKbps,
+          netConns: netTotal != null && netTotal > 0 ? 1 : 0,
+        ),
+      );
     }
 
     if (disks.isEmpty || processes.isEmpty) {
@@ -525,6 +708,7 @@ fi
 
     final totalCpu = (sumPcpu / ncpu).clamp(0.0, 100.0);
     _network = activeNet;
+    _processNetBytes = currentProcessNet;
     _time = time;
 
     return LinuxTelemetry(
@@ -537,7 +721,7 @@ fi
       upKbps: seconds > 0 ? upBytes / seconds / 1024.0 : 0.0,
       downKbps: seconds > 0 ? downBytes / seconds / 1024.0 : 0.0,
       disks: disks,
-      processes: processes,
+      processes: selectMultiDimensionTopProcesses(processes),
     );
   }
 }

@@ -49,10 +49,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   OutputDebugStringW(L"[TermX] window.Create succeeded, forcing visibility\n");
 
-  // Force show the window with multiple strategies
+  // Force show the window while preserving restored maximized state
   HWND hwnd = window.GetHandle();
   if (hwnd) {
-    ShowWindow(hwnd, SW_SHOWNORMAL);
+    if (!::IsZoomed(hwnd)) {
+      ShowWindow(hwnd, SW_SHOWNORMAL);
+    }
     UpdateWindow(hwnd);
     SetForegroundWindow(hwnd);
     BringWindowToTop(hwnd);

@@ -13,6 +13,7 @@ import 'package:termx/main.dart';
 import 'package:termx/plugins/docker_inspector/docker_inspector_plugin.dart';
 import 'package:termx/plugins/server_monitor/server_monitor_plugin.dart';
 import 'package:termx/plugins/sftp_manager/sftp_manager_plugin.dart';
+import 'package:termx/ui/mobile/mobile_accessory_keyboard.dart';
 import 'package:termx/ui/widgets/terminal_pane_view.dart';
 
 void main() {
@@ -145,4 +146,80 @@ void main() {
     }
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  test('VirtualModifierController transforms CTRL and ALT combinations', () {
+    final mod = VirtualModifierController();
+    addTearDown(mod.dispose);
+
+    // 1. 单击激活 CTRL，转换软键盘输入 'c' -> \x03 并自动复位
+    mod.tapCtrl(now: DateTime(2026, 11, 17, 10, 0, 0));
+    expect(mod.isCtrlActive, isTrue);
+    expect(mod.ctrlLocked, isFalse);
+    expect(mod.transformTerminalOutput('c'), '\x03');
+    expect(mod.isCtrlActive, isFalse);
+
+    // 2. CTRL + 方向键 -> \x1b[1;5D
+    mod.tapCtrl(now: DateTime(2026, 11, 17, 10, 0, 2));
+    expect(mod.applyAndConsume('\x1b[D'), '\x1b[1;5D');
+    expect(mod.isCtrlActive, isFalse);
+
+    // 3. 350ms 内双击锁定 CTRL🔒，连续生效直到再次点击解锁
+    final t0 = DateTime(2026, 11, 17, 10, 0, 5);
+    mod.tapCtrl(now: t0);
+    mod.tapCtrl(now: t0.add(const Duration(milliseconds: 180)));
+    expect(mod.ctrlLocked, isTrue);
+    expect(mod.applyAndConsume('d'), '\x04');
+    expect(mod.isCtrlActive, isTrue);
+    expect(mod.applyAndConsume('z'), '\x1a');
+    expect(mod.isCtrlActive, isTrue);
+    mod.tapCtrl(now: t0.add(const Duration(seconds: 2)));
+    expect(mod.isCtrlActive, isFalse);
+  });
+
+  testWidgets(
+    'MobileAccessoryKeyboardBar expands CTRL combos and supports reconnect',
+    (WidgetTester tester) async {
+      final sent = <String>[];
+      var reconnected = 0;
+      final mod = VirtualModifierController();
+      addTearDown(mod.dispose);
+
+      await tester.pumpWidget(
+        Directionality(
+          textDirection: TextDirection.ltr,
+          child: MediaQuery(
+            data: const MediaQueryData(),
+            child: MobileAccessoryKeyboardBar(
+              modifierController: mod,
+              onSendRaw: sent.add,
+              onOpenSnippets: () {},
+              onOpenSftp: () {},
+              onOpenMonitor: () {},
+              onReconnect: () => reconnected++,
+              isDisconnected: true,
+            ),
+          ),
+        ),
+      );
+
+      // 断开态显示“重新连接”按钮
+      expect(find.text('重新连接'), findsOneWidget);
+      await tester.tap(find.text('重新连接'));
+      await tester.pump();
+      expect(reconnected, 1);
+
+      // 点击 CTRL 立即展开组合键栏（无 300ms 手势延迟）
+      await tester.tap(find.byKey(const ValueKey('mobile_key_ctrl')));
+      await tester.pump();
+      expect(mod.isCtrlActive, isTrue);
+      expect(find.byKey(const ValueKey('mobile_ctrl_combo_C')), findsOneWidget);
+      expect(find.byKey(const ValueKey('mobile_ctrl_combo_D')), findsOneWidget);
+
+      // 点击 ^D 组合键发送 \x04 并自动复位单次 CTRL
+      await tester.tap(find.byKey(const ValueKey('mobile_ctrl_combo_D')));
+      await tester.pump();
+      expect(sent, ['\x04']);
+      expect(mod.isCtrlActive, isFalse);
+    },
+  );
 }

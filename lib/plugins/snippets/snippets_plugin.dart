@@ -93,21 +93,30 @@ class SnippetsPlugin extends TermXPlugin {
         return Column(
           children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(12, 10, 10, 6),
+              padding: const EdgeInsets.fromLTRB(12, 10, 10, 8),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   const Text(
                     '点击片段发送到当前终端',
-                    style: TextStyle(fontSize: 11.5, color: TxColors.textMuted),
-                  ),
-                  OutlinedButton.icon(
-                    style: OutlinedButton.styleFrom(
-                      visualDensity: VisualDensity.compact,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      color: TxColors.textSecondary,
                     ),
-                    onPressed: () => _showAddDialog(context),
-                    icon: const Icon(Icons.add_rounded, size: 14),
-                    label: const Text('新建片段', style: TextStyle(fontSize: 11)),
+                  ),
+                  SizedBox(
+                    height: 32,
+                    child: OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 11),
+                      ),
+                      onPressed: () => _showAddDialog(context),
+                      icon: const Icon(Icons.add_rounded, size: 16),
+                      label: const Text(
+                        '新建片段',
+                        style: TextStyle(fontSize: 12.5),
+                      ),
+                    ),
                   ),
                 ],
               ),
@@ -119,16 +128,23 @@ class SnippetsPlugin extends TermXPlugin {
                 itemBuilder: (context, idx) {
                   final item = _snippets[idx];
                   return Container(
-                    margin: const EdgeInsets.only(bottom: 6),
+                    margin: const EdgeInsets.only(bottom: 8),
                     decoration: BoxDecoration(
                       color: TxColors.bgPanel,
-                      borderRadius: BorderRadius.circular(6),
+                      borderRadius: BorderRadius.circular(7),
                       border: Border.all(color: TxColors.borderSubtle),
                     ),
                     child: ListTile(
-                      dense: true,
-                      visualDensity: VisualDensity.compact,
-                      contentPadding: const EdgeInsets.only(left: 10, right: 4),
+                      visualDensity: const VisualDensity(
+                        horizontal: 0,
+                        vertical: -1,
+                      ),
+                      contentPadding: const EdgeInsets.only(
+                        left: 12,
+                        right: 6,
+                        top: 2,
+                        bottom: 2,
+                      ),
                       onTap: () {
                         pluginContext.writeToTerminal(item.command);
                         pluginContext.showToast('已执行片段: ${item.command}');
@@ -137,29 +153,29 @@ class SnippetsPlugin extends TermXPlugin {
                         children: [
                           Container(
                             padding: const EdgeInsets.symmetric(
-                              horizontal: 5,
-                              vertical: 1,
+                              horizontal: 6,
+                              vertical: 2,
                             ),
                             decoration: BoxDecoration(
                               color: TxColors.bgElevated,
-                              borderRadius: BorderRadius.circular(3),
+                              borderRadius: BorderRadius.circular(4),
                               border: Border.all(color: TxColors.borderDefault),
                             ),
                             child: Text(
                               item.category,
                               style: const TextStyle(
-                                fontSize: 9.5,
+                                fontSize: 10.5,
                                 color: TxColors.textSecondary,
                                 fontWeight: FontWeight.w600,
                               ),
                             ),
                           ),
-                          const SizedBox(width: 7),
+                          const SizedBox(width: 8),
                           Expanded(
                             child: Text(
                               item.title,
                               style: const TextStyle(
-                                fontSize: 12,
+                                fontSize: 13,
                                 fontWeight: FontWeight.w500,
                                 color: TxColors.textPrimary,
                               ),
@@ -168,28 +184,38 @@ class SnippetsPlugin extends TermXPlugin {
                         ],
                       ),
                       subtitle: Padding(
-                        padding: const EdgeInsets.only(top: 3),
+                        padding: const EdgeInsets.only(top: 4),
                         child: Text(
                           item.command,
                           style: const TextStyle(
                             fontFamily: TxColors.monoFamily,
-                            fontSize: 11,
+                            fontSize: 12,
                             color: TxColors.textMuted,
                           ),
                         ),
                       ),
-                      trailing: IconButton(
-                        visualDensity: VisualDensity.compact,
-                        tooltip: '发送到终端执行',
-                        icon: const Icon(
-                          Icons.play_arrow_rounded,
-                          size: 18,
-                          color: TxColors.iconDefault,
+                      trailing: SizedBox(
+                        width: 34,
+                        height: 34,
+                        child: IconButton(
+                          padding: EdgeInsets.zero,
+                          style: IconButton.styleFrom(
+                            hoverColor: TxColors.bgHover,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                          ),
+                          tooltip: '发送到终端执行',
+                          icon: const Icon(
+                            Icons.play_arrow_rounded,
+                            size: 20,
+                            color: TxColors.iconDefault,
+                          ),
+                          onPressed: () {
+                            pluginContext.writeToTerminal(item.command);
+                            pluginContext.showToast('已执行片段: ${item.command}');
+                          },
                         ),
-                        onPressed: () {
-                          pluginContext.writeToTerminal(item.command);
-                          pluginContext.showToast('已执行片段: ${item.command}');
-                        },
                       ),
                     ),
                   );

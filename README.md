@@ -21,6 +21,7 @@
 3. **微内核插件架构 (`TermXPlugin`)**
    - **`ServerMonitorPlugin` (`plugin.server_monitor`)**：复用 SSH 独立 Exec 通道实时监控服务器 CPU（含多核负载与历史波形）、内存/Swap、网卡实时吞吐、磁盘分区告警与 Top 进程一键 `SIGTERM`。
    - **`SftpManagerPlugin` (`plugin.sftp_manager`)**：基于 SFTP 协议的可视化文件管理器，支持上传下载进度队列、iPadOS 分屏拖拽投递、`chmod` 权限修改及内置远程配置文件编辑器。
+   - **`CommandBeautifierPlugin` (`plugin.command_beautifier`)**：终端常见命令输出美化卡片贴片插件。自动检测 `docker ps/stats/images`、`kubectl get`、`top/htop`、`ps/Get-Process`、`df/du`、`free/nvidia-smi`、`ss/netstat`、`ip/ipconfig/ping`、`systemctl/ufw`、`ls -la`、`git status/log` 等 12 大类命令输出，在对应终端窗格贴合渲染结构化可视化卡片，并支持随时一键切换 **美化卡片** 与 **终端原文**（快捷键 `Alt+B`）。
    - **`SnippetsPlugin` (`plugin.snippets`)**：移动端与平板端一键下发常用运维脚本片段。
    - **`PortForwardPlugin` (`plugin.port_forward`)**：可视化管理 SSH 本地 (`-L`) 与远程 (`-R`) 端口转发隧道。
    - **`DockerInspectorPlugin` (`plugin.docker_ui`)**：可在应用内“插件中心”一键动态热加载的社区扩展插件示例。
@@ -46,6 +47,7 @@
 | 上一个 / 下一个标签 | Ctrl+Shift+Tab / Ctrl+Tab |
 | 复制 / 粘贴 / 全选 | Ctrl+Shift+C / V / A |
 | 查找 / 上下一个匹配 | Ctrl+Shift+F / Shift+F3 / F3 |
+| 切换命令美化卡片 / 终端原文 | Alt+B |
 | 清屏 | Ctrl+Shift+K |
 | 调整字号 / 重置 | Ctrl+加号 / 减号 / 0 |
 

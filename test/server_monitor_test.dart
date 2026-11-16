@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -6,6 +7,7 @@ import 'package:termx/core/models/host_config.dart';
 import 'package:termx/core/plugin_system/plugin_interface.dart';
 import 'package:termx/core/ssh/ssh_session_controller.dart';
 import 'package:termx/plugins/server_monitor/linux_telemetry.dart';
+import 'package:termx/plugins/server_monitor/local_host_telemetry.dart';
 import 'package:termx/plugins/server_monitor/server_monitor_plugin.dart';
 
 String sample({
@@ -332,4 +334,242 @@ devfs 210 210 0 100% /dev
       expect(second.upKbps, closeTo(50.0, 0.01));
     },
   );
+
+  test(
+    'Linux PROC_IO and PROC_NET sections compute per-process disk & network KB/s',
+    () {
+      String richLinuxSample({
+        required int diskBytes,
+        required int netBytes,
+      }) => '''
+${sample(user: 150, idle: 950)}
+[PROC_IO]
+42\t$diskBytes
+[PROC_NET]
+99\t$netBytes\t6
+''';
+      final sampler = LinuxTelemetrySampler();
+      sampler.sample(
+        richLinuxSample(diskBytes: 102400, netBytes: 51200),
+        Duration.zero,
+      );
+      final second = sampler.sample(
+        richLinuxSample(
+          diskBytes: 102400 + 512 * 1024,
+          netBytes: 51200 + 256 * 1024,
+        ),
+        const Duration(seconds: 1),
+      );
+      final proc42 = second.processes.firstWhere((p) => p.pid == 42);
+      final proc99 = second.processes.firstWhere((p) => p.pid == 99);
+      expect(proc42.diskKbps, closeTo(512.0, 0.01));
+      expect(proc99.netKbps, closeTo(256.0, 0.01));
+      expect(proc99.netConns, 6);
+    },
+  );
+
+  test('LocalHostTelemetrySampler reads real Windows CPU, RAM, disks and processes', () async {
+    if (!Platform.isWindows) return;
+    final localSampler = LocalHostTelemetrySampler();
+    final t0 = await localSampler.sample(Duration.zero);
+    expect(t0.totalGb, greaterThan(1.0));
+    expect(t0.usedGb, greaterThan(0.2));
+    expect(t0.cores, isNotEmpty);
+    expect(t0.disks, isNotEmpty);
+    expect(t0.processes, isNotEmpty);
+
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    final t1 = await localSampler.sample(const Duration(milliseconds: 80));
+    expect(t1.cpu, inInclusiveRange(0.0, 100.0));
+    expect(t1.downKbps, greaterThanOrEqualTo(0.0));
+    expect(t1.upKbps, greaterThanOrEqualTo(0.0));
+    expect(
+      t1.processes.any((p) => (p.memMb ?? 0) > 1.0),
+      isTrue,
+    );
+  });
+
+  testWidgets(
+    'Local PowerShell displays host telemetry and sorts active processes by CPU, Memory, Disk, Network',
+    (tester) async {
+      String? lastSentInput;
+      final localSession = _FakeConnectedLocalSession(
+        onInput: (cmd) => lastSentInput = cmd,
+      );
+      final monitor = ServerMonitorPlugin(
+        localSamplerOverride: (_) async => LinuxTelemetry(
+          cpu: 34.5,
+          cores: const [42.0, 27.0, 38.0, 31.0],
+          loads: const [1.38, 1.12, 0.95],
+          usedGb: 14.2,
+          cachedGb: 6.4,
+          totalGb: 32.0,
+          upKbps: 256.0,
+          downKbps: 2048.0,
+          disks: [
+            LinuxDiskUsage('System · NTFS', r'C:\', 500.0, 240.0, 0.48),
+            LinuxDiskUsage('Work · NTFS', r'D:\', 1000.0, 620.0, 0.62),
+          ],
+          processes: [
+            LinuxProcessUsage(
+              1001,
+              'cpu-heavy.exe',
+              48.0,
+              2.0,
+              memMb: 650.0,
+              diskKbps: 12.0,
+              netKbps: 0.0,
+            ),
+            LinuxProcessUsage(
+              1002,
+              'mem-heavy.exe',
+              3.5,
+              15.0,
+              memMb: 4915.0,
+              diskKbps: 0.0,
+              netKbps: 20.0,
+              netConns: 3,
+            ),
+            LinuxProcessUsage(
+              1003,
+              'disk-heavy.exe',
+              6.0,
+              1.5,
+              memMb: 480.0,
+              diskKbps: 9216.0,
+              netKbps: 0.0,
+            ),
+            LinuxProcessUsage(
+              1004,
+              'net-heavy.exe',
+              4.2,
+              3.0,
+              memMb: 980.0,
+              diskKbps: 40.0,
+              netKbps: 4096.0,
+              netConns: 28,
+            ),
+          ],
+        ),
+      );
+
+      await monitor.onInit();
+      monitor.onActiveSessionChanged(localSession);
+      await tester.pump();
+      await tester.pump();
+
+      final ctx = PluginContext(
+        activeSession: localSession,
+        showToast: (_) {},
+        requestOpenPanel: (_) {},
+      );
+
+      tester.view.physicalSize = const Size(800, 1400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(),
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => SizedBox(
+                width: 420,
+                height: 1300,
+                child: Column(
+                  children: [
+                    monitor.buildStatusBarWidget(context, ctx),
+                    Expanded(child: monitor.buildPanelWidget(context, ctx)),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      // 1. 本地会话不再提示“需要连接 SSH 服务器”，状态栏与面板均展示本机真实负载
+      expect(find.textContaining('当前为本地 PowerShell 会话'), findsNothing);
+      expect(find.text('本机'), findsOneWidget);
+      expect(find.textContaining('总使用率 34.5%'), findsOneWidget);
+      expect(find.textContaining(r'C:\ (System · NTFS)'), findsOneWidget);
+
+      // 2. 默认按 CPU 降序：cpu-heavy.exe 排在第一位
+      expect(
+        tester.getTopLeft(find.text('cpu-heavy.exe')).dy,
+        lessThan(tester.getTopLeft(find.text('mem-heavy.exe')).dy),
+      );
+
+      // 3. 点击「内存」：mem-heavy.exe (4.8 GB) 跃升至第一位
+      await tester.tap(find.byKey(const ValueKey<String>('proc-sort-memory')));
+      await tester.pump();
+      expect(
+        tester.getTopLeft(find.text('mem-heavy.exe')).dy,
+        lessThan(tester.getTopLeft(find.text('cpu-heavy.exe')).dy),
+      );
+
+      // 4. 点击「磁盘」：disk-heavy.exe (9.0 MB/s) 跃升至第一位
+      await tester.tap(find.byKey(const ValueKey<String>('proc-sort-disk')));
+      await tester.pump();
+      expect(
+        tester.getTopLeft(find.text('disk-heavy.exe')).dy,
+        lessThan(tester.getTopLeft(find.text('mem-heavy.exe')).dy),
+      );
+
+      // 5. 点击「网络」：net-heavy.exe (4.0 MB/s, 28 连接) 跃升至第一位
+      await tester.tap(find.byKey(const ValueKey<String>('proc-sort-network')));
+      await tester.pump();
+      expect(
+        tester.getTopLeft(find.text('net-heavy.exe')).dy,
+        lessThan(tester.getTopLeft(find.text('disk-heavy.exe')).dy),
+      );
+
+      // 再次点击「网络」切换升序：net-heavy.exe 排到最底部
+      await tester.tap(find.byKey(const ValueKey<String>('proc-sort-network')));
+      await tester.pump();
+      expect(
+        tester.getTopLeft(find.text('cpu-heavy.exe')).dy,
+        lessThan(tester.getTopLeft(find.text('net-heavy.exe')).dy),
+      );
+
+      // 6. 在本地 Windows PowerShell 下点击结束进程按钮会注入 Stop-Process -Id <PID>
+      if (Platform.isWindows) {
+        await tester.tap(find.byTooltip('结束进程 (Stop-Process -Id 1004)'));
+        await tester.pump();
+        expect(lastSentInput, 'Stop-Process -Id 1004\r');
+      }
+
+      monitor.onUnload();
+      await tester.pumpWidget(const SizedBox.shrink());
+      monitor.dispose();
+      localSession.dispose();
+    },
+  );
+}
+
+class _FakeConnectedLocalSession extends SshSessionController {
+  _FakeConnectedLocalSession({required this.onInput})
+    : super(
+        sessionId: 'local-ps-test',
+        host: const HostConfig(
+          id: 'local_ps',
+          name: '本地 PowerShell',
+          host: 'localhost',
+          authMethod: AuthMethod.localShell,
+        ),
+      );
+
+  final ValueChanged<String> onInput;
+
+  @override
+  SessionConnectionState get state => SessionConnectionState.connected;
+
+  @override
+  void sendRawInput(String data) {
+    onInput(data);
+  }
 }

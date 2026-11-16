@@ -806,26 +806,26 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
           borderRadius: BorderRadius.circular(4),
           onTap: () => pluginContext.requestOpenPanel(pluginId),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Icon(
                   Icons.folder_open_outlined,
-                  size: 12,
+                  size: 13.5,
                   color: activeCount > 0 ? TxColors.accent : TxColors.textMuted,
                 ),
-                const SizedBox(width: 4),
+                const SizedBox(width: 5),
                 Text(
                   activeCount > 0
                       ? 'SFTP 传输中 ($activeCount)'
                       : 'SFTP $_currentPath ($visibleCount)',
                   style: TextStyle(
-                    fontSize: 10.5,
+                    fontSize: 11.5,
                     fontFamily: TxColors.monoFamily,
                     color: activeCount > 0
                         ? TxColors.accent
-                        : TxColors.textMuted,
+                        : TxColors.textSecondary,
                   ),
                 ),
               ],
@@ -833,6 +833,103 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
           ),
         );
       },
+    );
+  }
+
+  Widget _buildToolbarIconButton({
+    required String tooltip,
+    required IconData icon,
+    required VoidCallback? onPressed,
+    bool active = false,
+  }) {
+    final enabled = onPressed != null;
+    return SizedBox(
+      width: 34,
+      height: 34,
+      child: IconButton(
+        padding: EdgeInsets.zero,
+        tooltip: tooltip,
+        style: IconButton.styleFrom(
+          backgroundColor: active ? TxColors.accentSoft : TxColors.bgChrome,
+          hoverColor: TxColors.bgHover,
+          disabledBackgroundColor: TxColors.bgChrome.withValues(alpha: 0.45),
+          side: BorderSide(
+            color: active
+                ? TxColors.accent.withValues(alpha: 0.65)
+                : TxColors.borderSubtle,
+          ),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(6),
+          ),
+        ),
+        icon: Icon(
+          icon,
+          size: 18,
+          color: !enabled
+              ? TxColors.textMuted.withValues(alpha: 0.4)
+              : (active ? TxColors.accent : TxColors.iconDefault),
+        ),
+        onPressed: onPressed,
+      ),
+    );
+  }
+
+  Widget _buildQuickActionButton({
+    required String label,
+    required String tooltip,
+    required IconData icon,
+    required VoidCallback onTap,
+    bool highlighted = false,
+    Color? iconColor,
+  }) {
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: highlighted ? TxColors.accentSoft : TxColors.bgPanel,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(7),
+          side: BorderSide(
+            color: highlighted ? TxColors.accent : TxColors.borderDefault,
+          ),
+        ),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(7),
+          hoverColor: TxColors.bgHover,
+          onTap: onTap,
+          child: Container(
+            height: 35,
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  icon,
+                  size: 16.5,
+                  color:
+                      iconColor ??
+                      (highlighted ? TxColors.accent : TxColors.iconDefault),
+                ),
+                const SizedBox(width: 5),
+                Flexible(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w500,
+                      color: highlighted
+                          ? TxColors.textPrimary
+                          : TxColors.textPrimary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -847,7 +944,7 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
       return const Center(
         child: Text(
           '请先连接一个远程 SSH 会话',
-          style: TextStyle(fontSize: 12, color: TxColors.textMuted),
+          style: TextStyle(fontSize: 13, color: TxColors.textMuted),
         ),
       );
     }
@@ -869,12 +966,9 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
             children: [
               Column(
                 children: [
-                  // 顶部路径导航与操作栏（统一灰阶单色工具栏图标）
+                  // 第一层：路径导航栏（大尺寸圆角按钮 + 清晰等宽路径框）
                   Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 6,
-                      vertical: 5,
-                    ),
+                    padding: const EdgeInsets.fromLTRB(10, 9, 10, 8),
                     decoration: const BoxDecoration(
                       color: TxColors.bgSidebar,
                       border: Border(
@@ -883,47 +977,28 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
                     ),
                     child: Row(
                       children: [
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          constraints: const BoxConstraints(
-                            minWidth: 26,
-                            minHeight: 26,
-                          ),
-                          padding: EdgeInsets.zero,
+                        _buildToolbarIconButton(
                           tooltip: '返回上级目录 (..)',
-                          icon: const Icon(
-                            Icons.arrow_upward_rounded,
-                            size: 15,
-                            color: TxColors.iconDefault,
-                          ),
+                          icon: Icons.arrow_upward_rounded,
                           onPressed: connected && _currentPath != '/'
                               ? navigateUp
                               : null,
                         ),
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          constraints: const BoxConstraints(
-                            minWidth: 26,
-                            minHeight: 26,
-                          ),
-                          padding: EdgeInsets.zero,
+                        const SizedBox(width: 6),
+                        _buildToolbarIconButton(
                           tooltip: '回到用户主目录 (~)',
-                          icon: const Icon(
-                            Icons.home_outlined,
-                            size: 15,
-                            color: TxColors.iconDefault,
-                          ),
+                          icon: Icons.home_outlined,
                           onPressed: connected ? navigateHome : null,
                         ),
-                        const SizedBox(width: 2),
+                        const SizedBox(width: 8),
                         Expanded(
                           child: SizedBox(
-                            height: 26,
+                            height: 34,
                             child: TextField(
                               controller: _pathController,
                               enabled: connected,
                               style: const TextStyle(
-                                fontSize: 11.5,
+                                fontSize: 13,
                                 fontFamily: TxColors.monoFamily,
                                 color: TxColors.textPrimary,
                               ),
@@ -931,21 +1006,21 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
                                 isDense: true,
                                 hintText: '/home/user',
                                 contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                  vertical: 5,
+                                  horizontal: 10,
+                                  vertical: 7.5,
                                 ),
                                 filled: true,
                                 fillColor: TxColors.bgChrome,
                                 border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(5),
+                                  borderRadius: BorderRadius.circular(6),
                                   borderSide: const BorderSide(
-                                    color: TxColors.borderSubtle,
+                                    color: TxColors.borderDefault,
                                   ),
                                 ),
                                 enabledBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(5),
+                                  borderRadius: BorderRadius.circular(6),
                                   borderSide: const BorderSide(
-                                    color: TxColors.borderSubtle,
+                                    color: TxColors.borderDefault,
                                   ),
                                 ),
                               ),
@@ -953,159 +1028,74 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
                             ),
                           ),
                         ),
-                        const SizedBox(width: 2),
-                        _buildSortPopupMenuButton(),
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          constraints: const BoxConstraints(
-                            minWidth: 26,
-                            minHeight: 26,
-                          ),
-                          padding: EdgeInsets.zero,
+                        const SizedBox(width: 8),
+                        _buildToolbarIconButton(
                           tooltip: _showHiddenFiles
                               ? '隐藏点文件 (.*)'
                               : '显示隐藏文件 (.*)',
-                          icon: Icon(
-                            _showHiddenFiles
-                                ? Icons.visibility_outlined
-                                : Icons.visibility_off_outlined,
-                            size: 15,
-                            color: _showHiddenFiles
-                                ? TxColors.textPrimary
-                                : TxColors.iconDefault,
-                          ),
+                          icon: _showHiddenFiles
+                              ? Icons.visibility_outlined
+                              : Icons.visibility_off_outlined,
+                          active: _showHiddenFiles,
                           onPressed: () {
                             _showHiddenFiles = !_showHiddenFiles;
                             notifyListeners();
                           },
                         ),
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          constraints: const BoxConstraints(
-                            minWidth: 26,
-                            minHeight: 26,
-                          ),
-                          padding: EdgeInsets.zero,
-                          tooltip: '选择本地文件上传 (支持多选)',
-                          icon: const Icon(
-                            Icons.file_upload_outlined,
-                            size: 16,
-                            color: TxColors.iconDefault,
-                          ),
-                          onPressed: connected
-                              ? () => _handleToolbarUpload(
-                                  context,
-                                  pluginContext,
-                                )
-                              : null,
-                        ),
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          constraints: const BoxConstraints(
-                            minWidth: 26,
-                            minHeight: 26,
-                          ),
-                          padding: EdgeInsets.zero,
-                          tooltip: '新建文件夹 (mkdir)',
-                          icon: const Icon(
-                            Icons.create_new_folder_outlined,
-                            size: 15.5,
-                            color: TxColors.iconDefault,
-                          ),
-                          onPressed: connected
-                              ? () => _showNewFolderDialog(
-                                  context,
-                                  pluginContext,
-                                )
-                              : null,
-                        ),
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          constraints: const BoxConstraints(
-                            minWidth: 26,
-                            minHeight: 26,
-                          ),
-                          padding: EdgeInsets.zero,
+                        const SizedBox(width: 6),
+                        _buildToolbarIconButton(
                           tooltip: '刷新远端目录',
-                          icon: const Icon(
-                            Icons.refresh_rounded,
-                            size: 15.5,
-                            color: TxColors.iconDefault,
-                          ),
+                          icon: Icons.refresh_rounded,
                           onPressed: connected ? refreshDirectory : null,
                         ),
                       ],
                     ),
                   ),
 
-                  // 拖拽上传提示条（克制中性灰底，拖拽悬停时再激活蓝色边框）
+                  // 第二层：上传/拖拽 + 新建文件 + 新建目录 独立大按钮栏（避免小字误触）
                   if (connected)
-                    InkWell(
-                      onTap: () => _handleToolbarUpload(context, pluginContext),
-                      child: Container(
-                        margin: const EdgeInsets.fromLTRB(8, 6, 8, 4),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 9,
-                          vertical: 5,
+                    Container(
+                      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+                      decoration: const BoxDecoration(
+                        color: TxColors.bgSidebar,
+                        border: Border(
+                          bottom: BorderSide(color: TxColors.borderSubtle),
                         ),
-                        decoration: BoxDecoration(
-                          color: _isDragHovering
-                              ? TxColors.accentSoft
-                              : TxColors.bgPanel,
-                          borderRadius: BorderRadius.circular(5),
-                          border: Border.all(
-                            color: _isDragHovering
-                                ? TxColors.accent
-                                : TxColors.borderSubtle,
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: _buildQuickActionButton(
+                              label: '上传 / 拖入文件',
+                              tooltip: '拖入文件或文件夹上传，或点击选择本地文件 (支持多选)',
+                              icon: Icons.upload_file_outlined,
+                              highlighted: _isDragHovering,
+                              iconColor: TxColors.accent,
+                              onTap: () =>
+                                  _handleToolbarUpload(context, pluginContext),
+                            ),
                           ),
-                        ),
-                        child: Row(
-                          children: [
-                            Icon(
-                              Icons.upload_rounded,
-                              size: 14,
-                              color: _isDragHovering
-                                  ? TxColors.accent
-                                  : TxColors.textMuted,
-                            ),
-                            const SizedBox(width: 6),
-                            const Expanded(
-                              child: Text(
-                                '拖入文件或文件夹上传，或点击选择',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: TxColors.textSecondary,
-                                ),
-                              ),
-                            ),
-                            InkWell(
-                              borderRadius: BorderRadius.circular(4),
-                              onTap: () => _showTextUploadDialog(
-                                context,
-                                pluginContext,
-                              ),
-                              child: const Padding(
-                                padding: EdgeInsets.symmetric(
-                                  horizontal: 4,
-                                  vertical: 1,
-                                ),
-                                child: Text(
-                                  '新建文件',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color: TxColors.accent,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
+                          const SizedBox(width: 6),
+                          _buildQuickActionButton(
+                            label: '新建文件',
+                            tooltip: '在当前目录新建文本文件',
+                            icon: Icons.note_add_outlined,
+                            onTap: () =>
+                                _showTextUploadDialog(context, pluginContext),
+                          ),
+                          const SizedBox(width: 6),
+                          _buildQuickActionButton(
+                            label: '新建目录',
+                            tooltip: '新建文件夹 (mkdir)',
+                            icon: Icons.create_new_folder_outlined,
+                            onTap: () =>
+                                _showNewFolderDialog(context, pluginContext),
+                          ),
+                        ],
                       ),
                     ),
 
-                  // 可点击排序表头栏
+                  // 第三层：可点击排序胶囊栏 + 项目计数 + 高级排序菜单
                   if (connected && !_loading && _errorMessage == null)
                     _buildSortHeaderBar(visibleEntries.length),
 
@@ -1116,8 +1106,8 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
                         : _loading
                         ? const Center(
                             child: SizedBox(
-                              width: 20,
-                              height: 20,
+                              width: 22,
+                              height: 22,
                               child: CircularProgressIndicator(strokeWidth: 2),
                             ),
                           )
@@ -1128,32 +1118,37 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
                             child: Text(
                               '当前目录为空（可将本地文件直接拖入此处上传）',
                               style: TextStyle(
-                                fontSize: 11.5,
+                                fontSize: 12.5,
                                 color: TxColors.textMuted,
                               ),
                             ),
                           )
                         : ListView.separated(
                             padding: const EdgeInsets.symmetric(
-                              horizontal: 6,
-                              vertical: 4,
+                              horizontal: 8,
+                              vertical: 6,
                             ),
                             itemCount: visibleEntries.length,
-                            separatorBuilder: (_, __) => const Divider(
+                            separatorBuilder: (_, _) => const Divider(
                               height: 1,
                               color: TxColors.borderSubtle,
                             ),
                             itemBuilder: (context, idx) {
                               final item = visibleEntries[idx];
                               return ListTile(
-                                dense: true,
-                                visualDensity: VisualDensity.compact,
-                                contentPadding: const EdgeInsets.only(
-                                  left: 8,
-                                  right: 2,
+                                visualDensity: const VisualDensity(
+                                  horizontal: 0,
+                                  vertical: -1,
                                 ),
+                                contentPadding: const EdgeInsets.only(
+                                  left: 10,
+                                  right: 4,
+                                  top: 1,
+                                  bottom: 1,
+                                ),
+                                hoverColor: TxColors.bgHover,
                                 shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(5),
+                                  borderRadius: BorderRadius.circular(6),
                                 ),
                                 leading: Icon(
                                   item.isDirectory
@@ -1162,26 +1157,29 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
                                   color: item.isDirectory
                                       ? TxColors.folderAmber
                                       : TxColors.fileSlate,
-                                  size: 18,
+                                  size: 21,
                                 ),
                                 title: Text(
                                   item.name,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: const TextStyle(
-                                    fontSize: 12,
+                                    fontSize: 13.5,
                                     fontWeight: FontWeight.w500,
                                     color: TxColors.textPrimary,
                                   ),
                                 ),
-                                subtitle: Text(
-                                  '${item.permissions}  ·  ${item.isDirectory ? '<DIR>' : _formatSize(item.sizeBytes)}  ·  ${_formatModifiedTime(item.modifiedAt)}',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    fontSize: 10,
-                                    fontFamily: TxColors.monoFamily,
-                                    color: TxColors.textMuted,
+                                subtitle: Padding(
+                                  padding: const EdgeInsets.only(top: 2),
+                                  child: Text(
+                                    '${item.permissions}  ·  ${item.isDirectory ? '<DIR>' : _formatSize(item.sizeBytes)}  ·  ${_formatModifiedTime(item.modifiedAt)}',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      fontSize: 11.5,
+                                      fontFamily: TxColors.monoFamily,
+                                      color: TxColors.textMuted,
+                                    ),
                                   ),
                                 ),
                                 onTap: () {
@@ -1198,140 +1196,165 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
                                 trailing: Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    IconButton(
-                                      visualDensity: VisualDensity.compact,
-                                      constraints: const BoxConstraints(
-                                        minWidth: 28,
-                                        minHeight: 28,
+                                    SizedBox(
+                                      width: 32,
+                                      height: 32,
+                                      child: IconButton(
+                                        padding: EdgeInsets.zero,
+                                        style: IconButton.styleFrom(
+                                          hoverColor: TxColors.bgElevated,
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(
+                                              6,
+                                            ),
+                                          ),
+                                        ),
+                                        tooltip: item.isDirectory
+                                            ? '下载此文件夹到本地（选择目录）…'
+                                            : '下载到本地（选择保存路径）…',
+                                        icon: const Icon(
+                                          Icons.download_rounded,
+                                          size: 17.5,
+                                          color: TxColors.iconDefault,
+                                        ),
+                                        onPressed: () {
+                                          if (item.isDirectory) {
+                                            downloadRemoteDirectory(
+                                              context,
+                                              item,
+                                              pluginContext,
+                                            );
+                                          } else {
+                                            downloadRemoteFile(
+                                              context,
+                                              item,
+                                              pluginContext,
+                                            );
+                                          }
+                                        },
                                       ),
-                                      padding: EdgeInsets.zero,
-                                      tooltip: item.isDirectory
-                                          ? '下载此文件夹到本地（选择目录）…'
-                                          : '下载到本地（选择保存路径）…',
-                                      icon: const Icon(
-                                        Icons.download_rounded,
-                                        size: 15,
-                                        color: TxColors.iconDefault,
-                                      ),
-                                      onPressed: () {
-                                        if (item.isDirectory) {
-                                          downloadRemoteDirectory(
-                                            context,
-                                            item,
-                                            pluginContext,
-                                          );
-                                        } else {
-                                          downloadRemoteFile(
-                                            context,
-                                            item,
-                                            pluginContext,
-                                          );
-                                        }
-                                      },
                                     ),
-                                    PopupMenuButton<String>(
-                                      tooltip: '更多文件操作',
-                                      padding: EdgeInsets.zero,
-                                      icon: const Icon(
-                                        Icons.more_horiz_rounded,
-                                        size: 15.5,
-                                        color: TxColors.textMuted,
+                                    const SizedBox(width: 2),
+                                    SizedBox(
+                                      width: 32,
+                                      height: 32,
+                                      child: PopupMenuButton<String>(
+                                        tooltip: '更多文件操作',
+                                        padding: EdgeInsets.zero,
+                                        style: IconButton.styleFrom(
+                                          hoverColor: TxColors.bgElevated,
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(
+                                              6,
+                                            ),
+                                          ),
+                                        ),
+                                        icon: const Icon(
+                                          Icons.more_horiz_rounded,
+                                          size: 18,
+                                          color: TxColors.iconDefault,
+                                        ),
+                                        onSelected: (action) {
+                                          switch (action) {
+                                            case 'open':
+                                              if (item.isDirectory) {
+                                                navigateTo(item.fullPath);
+                                              } else {
+                                                _openRemoteEditorDialog(
+                                                  context,
+                                                  item,
+                                                  pluginContext,
+                                                );
+                                              }
+                                            case 'download':
+                                              if (item.isDirectory) {
+                                                downloadRemoteDirectory(
+                                                  context,
+                                                  item,
+                                                  pluginContext,
+                                                );
+                                              } else {
+                                                downloadRemoteFile(
+                                                  context,
+                                                  item,
+                                                  pluginContext,
+                                                );
+                                              }
+                                            case 'rename':
+                                              _showRenameDialog(
+                                                context,
+                                                item,
+                                                pluginContext,
+                                              );
+                                            case 'chmod':
+                                              _showChmodDialog(
+                                                context,
+                                                item,
+                                                pluginContext,
+                                              );
+                                            case 'delete':
+                                              _confirmDeleteDialog(
+                                                context,
+                                                item,
+                                                pluginContext,
+                                              );
+                                          }
+                                        },
+                                        itemBuilder: (ctx) => [
+                                          PopupMenuItem(
+                                            value: 'open',
+                                            height: 36,
+                                            child: Text(
+                                              item.isDirectory
+                                                  ? '打开文件夹'
+                                                  : '编辑文本文件',
+                                              style: const TextStyle(
+                                                fontSize: 13,
+                                              ),
+                                            ),
+                                          ),
+                                          PopupMenuItem(
+                                            value: 'download',
+                                            height: 36,
+                                            child: Text(
+                                              item.isDirectory
+                                                  ? '下载文件夹到本地…'
+                                                  : '下载到本地（选择路径）…',
+                                              style: const TextStyle(
+                                                fontSize: 13,
+                                              ),
+                                            ),
+                                          ),
+                                          const PopupMenuItem(
+                                            value: 'rename',
+                                            height: 36,
+                                            child: Text(
+                                              '重命名',
+                                              style: TextStyle(fontSize: 13),
+                                            ),
+                                          ),
+                                          const PopupMenuItem(
+                                            value: 'chmod',
+                                            height: 36,
+                                            child: Text(
+                                              '修改权限 (chmod)',
+                                              style: TextStyle(fontSize: 13),
+                                            ),
+                                          ),
+                                          const PopupMenuDivider(),
+                                          const PopupMenuItem(
+                                            value: 'delete',
+                                            height: 36,
+                                            child: Text(
+                                              '删除',
+                                              style: TextStyle(
+                                                fontSize: 13,
+                                                color: TxColors.danger,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
                                       ),
-                                      onSelected: (action) {
-                                        switch (action) {
-                                          case 'open':
-                                            if (item.isDirectory) {
-                                              navigateTo(item.fullPath);
-                                            } else {
-                                              _openRemoteEditorDialog(
-                                                context,
-                                                item,
-                                                pluginContext,
-                                              );
-                                            }
-                                          case 'download':
-                                            if (item.isDirectory) {
-                                              downloadRemoteDirectory(
-                                                context,
-                                                item,
-                                                pluginContext,
-                                              );
-                                            } else {
-                                              downloadRemoteFile(
-                                                context,
-                                                item,
-                                                pluginContext,
-                                              );
-                                            }
-                                          case 'rename':
-                                            _showRenameDialog(
-                                              context,
-                                              item,
-                                              pluginContext,
-                                            );
-                                          case 'chmod':
-                                            _showChmodDialog(
-                                              context,
-                                              item,
-                                              pluginContext,
-                                            );
-                                          case 'delete':
-                                            _confirmDeleteDialog(
-                                              context,
-                                              item,
-                                              pluginContext,
-                                            );
-                                        }
-                                      },
-                                      itemBuilder: (ctx) => [
-                                        PopupMenuItem(
-                                          value: 'open',
-                                          child: Text(
-                                            item.isDirectory
-                                                ? '打开文件夹'
-                                                : '编辑文本文件',
-                                            style: const TextStyle(
-                                              fontSize: 12.5,
-                                            ),
-                                          ),
-                                        ),
-                                        PopupMenuItem(
-                                          value: 'download',
-                                          child: Text(
-                                            item.isDirectory
-                                                ? '下载文件夹到本地…'
-                                                : '下载到本地（选择路径）…',
-                                            style: const TextStyle(
-                                              fontSize: 12.5,
-                                            ),
-                                          ),
-                                        ),
-                                        const PopupMenuItem(
-                                          value: 'rename',
-                                          child: Text(
-                                            '重命名',
-                                            style: TextStyle(fontSize: 12.5),
-                                          ),
-                                        ),
-                                        const PopupMenuItem(
-                                          value: 'chmod',
-                                          child: Text(
-                                            '修改权限 (chmod)',
-                                            style: TextStyle(fontSize: 12.5),
-                                          ),
-                                        ),
-                                        const PopupMenuDivider(),
-                                        const PopupMenuItem(
-                                          value: 'delete',
-                                          child: Text(
-                                            '删除',
-                                            style: TextStyle(
-                                              fontSize: 12.5,
-                                              color: TxColors.danger,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
                                     ),
                                   ],
                                 ),
@@ -1343,8 +1366,8 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
                   // 底部传输队列状态栏
                   if (_transferTasks.isNotEmpty)
                     Container(
-                      constraints: const BoxConstraints(maxHeight: 120),
-                      padding: const EdgeInsets.all(8),
+                      constraints: const BoxConstraints(maxHeight: 132),
+                      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
                       decoration: const BoxDecoration(
                         color: TxColors.bgChrome,
                         border: Border(
@@ -1360,27 +1383,34 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
                               Text(
                                 '传输队列 (${_transferTasks.length})',
                                 style: const TextStyle(
-                                  fontSize: 11,
+                                  fontSize: 12,
                                   fontWeight: FontWeight.w600,
                                   color: TxColors.textSecondary,
                                 ),
                               ),
                               InkWell(
+                                borderRadius: BorderRadius.circular(4),
                                 onTap: () {
                                   _transferTasks.clear();
                                   notifyListeners();
                                 },
-                                child: const Text(
-                                  '清空',
-                                  style: TextStyle(
-                                    fontSize: 10.5,
-                                    color: TxColors.textMuted,
+                                child: const Padding(
+                                  padding: EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 2,
+                                  ),
+                                  child: Text(
+                                    '清空',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: TxColors.textSecondary,
+                                    ),
                                   ),
                                 ),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 4),
+                          const SizedBox(height: 5),
                           Expanded(
                             child: ListView.builder(
                               itemCount: _transferTasks.length,
@@ -1393,7 +1423,7 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
                                     t.targetNote != null;
                                 return Padding(
                                   padding: const EdgeInsets.symmetric(
-                                    vertical: 2,
+                                    vertical: 3,
                                   ),
                                   child: Row(
                                     children: [
@@ -1401,12 +1431,12 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
                                         t.direction == TransferDirection.upload
                                             ? Icons.arrow_upward_rounded
                                             : Icons.arrow_downward_rounded,
-                                        size: 12.5,
+                                        size: 14,
                                         color: t.completed
                                             ? TxColors.success
                                             : TxColors.accent,
                                       ),
-                                      const SizedBox(width: 5),
+                                      const SizedBox(width: 6),
                                       Expanded(
                                         child: Tooltip(
                                           message: t.targetNote ?? t.fileName,
@@ -1414,18 +1444,18 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
                                             t.fileName,
                                             overflow: TextOverflow.ellipsis,
                                             style: const TextStyle(
-                                              fontSize: 11,
+                                              fontSize: 12,
                                               color: TxColors.textPrimary,
                                             ),
                                           ),
                                         ),
                                       ),
-                                      const SizedBox(width: 6),
+                                      const SizedBox(width: 8),
                                       SizedBox(
-                                        width: 56,
+                                        width: 60,
                                         child: LinearProgressIndicator(
                                           value: t.progress,
-                                          minHeight: 3.5,
+                                          minHeight: 4,
                                           backgroundColor:
                                               TxColors.borderSubtle,
                                           valueColor:
@@ -1436,26 +1466,32 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
                                               ),
                                         ),
                                       ),
-                                      const SizedBox(width: 6),
+                                      const SizedBox(width: 8),
                                       Text(
                                         '${(t.progress * 100).toStringAsFixed(0)}%',
                                         style: const TextStyle(
-                                          fontSize: 10,
+                                          fontSize: 11.5,
                                           fontFamily: TxColors.monoFamily,
-                                          color: TxColors.textMuted,
+                                          color: TxColors.textSecondary,
                                         ),
                                       ),
                                       if (canReveal) ...[
-                                        const SizedBox(width: 4),
+                                        const SizedBox(width: 6),
                                         InkWell(
+                                          borderRadius: BorderRadius.circular(
+                                            4,
+                                          ),
                                           onTap: () =>
                                               _revealInExplorer(t.targetNote!),
-                                          child: const Tooltip(
-                                            message: '在资源管理器中定位文件',
-                                            child: Icon(
-                                              Icons.folder_open_rounded,
-                                              size: 13,
-                                              color: TxColors.iconDefault,
+                                          child: const Padding(
+                                            padding: EdgeInsets.all(3),
+                                            child: Tooltip(
+                                              message: '在资源管理器中定位文件',
+                                              child: Icon(
+                                                Icons.folder_open_rounded,
+                                                size: 15.5,
+                                                color: TxColors.iconDefault,
+                                              ),
                                             ),
                                           ),
                                         ),
@@ -2020,127 +2056,154 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
   }
 
   Widget _buildSortPopupMenuButton() {
-    return PopupMenuButton<String>(
-      tooltip:
-          '排序方式：按${_sortField.label} (${_sortAscending ? '升序' : '降序'})',
-      padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(minWidth: 165),
-      icon: const Icon(
-        Icons.sort_rounded,
-        size: 15.5,
-        color: TxColors.iconDefault,
-      ),
-      onSelected: (val) {
-        switch (val) {
-          case 'field:name':
-            setSortField(SftpSortField.name);
-          case 'field:modifiedTime':
-            setSortField(SftpSortField.modifiedTime);
-          case 'field:size':
-            setSortField(SftpSortField.size);
-          case 'field:type':
-            setSortField(SftpSortField.type);
-          case 'field:permissions':
-            setSortField(SftpSortField.permissions);
-          case 'dir:asc':
-            setSortAscending(true);
-          case 'dir:desc':
-            setSortAscending(false);
-          case 'opt:foldersFirst':
-            setFoldersFirst(!_foldersFirst);
-        }
-      },
-      itemBuilder: (context) => [
-        for (final f in SftpSortField.values)
+    return SizedBox(
+      width: 30,
+      height: 30,
+      child: PopupMenuButton<String>(
+        tooltip:
+            '更多排序选项：按${_sortField.label} (${_sortAscending ? '升序' : '降序'})',
+        padding: EdgeInsets.zero,
+        constraints: const BoxConstraints(minWidth: 180),
+        style: IconButton.styleFrom(
+          backgroundColor: TxColors.bgChrome,
+          hoverColor: TxColors.bgHover,
+          side: const BorderSide(color: TxColors.borderSubtle),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(6),
+          ),
+        ),
+        icon: const Icon(
+          Icons.sort_rounded,
+          size: 17,
+          color: TxColors.iconDefault,
+        ),
+        onSelected: (val) {
+          switch (val) {
+            case 'field:name':
+              setSortField(SftpSortField.name);
+            case 'field:modifiedTime':
+              setSortField(SftpSortField.modifiedTime);
+            case 'field:size':
+              setSortField(SftpSortField.size);
+            case 'field:type':
+              setSortField(SftpSortField.type);
+            case 'field:permissions':
+              setSortField(SftpSortField.permissions);
+            case 'dir:asc':
+              setSortAscending(true);
+            case 'dir:desc':
+              setSortAscending(false);
+            case 'opt:foldersFirst':
+              setFoldersFirst(!_foldersFirst);
+          }
+        },
+        itemBuilder: (context) => [
+          for (final f in SftpSortField.values)
+            PopupMenuItem<String>(
+              value: 'field:${f.name}',
+              height: 36,
+              child: Row(
+                children: [
+                  Icon(
+                    _sortField == f ? Icons.check_rounded : null,
+                    size: 15,
+                    color: TxColors.accent,
+                  ),
+                  const SizedBox(width: 8),
+                  Text('按${f.label}排序', style: const TextStyle(fontSize: 13)),
+                ],
+              ),
+            ),
+          const PopupMenuDivider(),
           PopupMenuItem<String>(
-            value: 'field:${f.name}',
-            height: 32,
+            value: 'dir:asc',
+            height: 36,
             child: Row(
               children: [
                 Icon(
-                  _sortField == f ? Icons.check_rounded : null,
-                  size: 14,
+                  _sortAscending ? Icons.check_rounded : null,
+                  size: 15,
                   color: TxColors.accent,
                 ),
                 const SizedBox(width: 8),
-                Text('按${f.label}排序', style: const TextStyle(fontSize: 12.5)),
+                const Text('升序排列 (↑)', style: TextStyle(fontSize: 13)),
               ],
             ),
           ),
-        const PopupMenuDivider(),
-        PopupMenuItem<String>(
-          value: 'dir:asc',
-          height: 32,
-          child: Row(
-            children: [
-              Icon(
-                _sortAscending ? Icons.check_rounded : null,
-                size: 14,
-                color: TxColors.accent,
-              ),
-              const SizedBox(width: 8),
-              const Text('升序排列 (↑)', style: TextStyle(fontSize: 12.5)),
-            ],
+          PopupMenuItem<String>(
+            value: 'dir:desc',
+            height: 36,
+            child: Row(
+              children: [
+                Icon(
+                  !_sortAscending ? Icons.check_rounded : null,
+                  size: 15,
+                  color: TxColors.accent,
+                ),
+                const SizedBox(width: 8),
+                const Text('降序排列 (↓)', style: TextStyle(fontSize: 13)),
+              ],
+            ),
           ),
-        ),
-        PopupMenuItem<String>(
-          value: 'dir:desc',
-          height: 32,
-          child: Row(
-            children: [
-              Icon(
-                !_sortAscending ? Icons.check_rounded : null,
-                size: 14,
-                color: TxColors.accent,
-              ),
-              const SizedBox(width: 8),
-              const Text('降序排列 (↓)', style: TextStyle(fontSize: 12.5)),
-            ],
+          const PopupMenuDivider(),
+          PopupMenuItem<String>(
+            value: 'opt:foldersFirst',
+            height: 36,
+            child: Row(
+              children: [
+                Icon(
+                  _foldersFirst
+                      ? Icons.check_box_rounded
+                      : Icons.check_box_outline_blank_rounded,
+                  size: 16,
+                  color: _foldersFirst ? TxColors.accent : TxColors.textMuted,
+                ),
+                const SizedBox(width: 8),
+                const Text('文件夹始终置顶', style: TextStyle(fontSize: 13)),
+              ],
+            ),
           ),
-        ),
-        const PopupMenuDivider(),
-        PopupMenuItem<String>(
-          value: 'opt:foldersFirst',
-          height: 32,
-          child: Row(
-            children: [
-              Icon(
-                _foldersFirst
-                    ? Icons.check_box_rounded
-                    : Icons.check_box_outline_blank_rounded,
-                size: 14.5,
-                color: _foldersFirst ? TxColors.accent : TxColors.textMuted,
-              ),
-              const SizedBox(width: 8),
-              const Text('文件夹始终置顶', style: TextStyle(fontSize: 12.5)),
-            ],
-          ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
   Widget _buildSortHeaderBar(int count) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      padding: const EdgeInsets.fromLTRB(10, 6, 10, 7),
       decoration: const BoxDecoration(
         color: TxColors.bgSidebar,
         border: Border(bottom: BorderSide(color: TxColors.borderSubtle)),
       ),
       child: Row(
         children: [
-          _buildSortChip(SftpSortField.name, '名称'),
-          const SizedBox(width: 4),
-          _buildSortChip(SftpSortField.size, '大小'),
-          const SizedBox(width: 4),
-          _buildSortChip(SftpSortField.modifiedTime, '时间'),
-          const SizedBox(width: 4),
-          _buildSortChip(SftpSortField.type, '类型'),
-          const Spacer(),
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  _buildSortChip(SftpSortField.name, '名称'),
+                  const SizedBox(width: 6),
+                  _buildSortChip(SftpSortField.size, '大小'),
+                  const SizedBox(width: 6),
+                  _buildSortChip(SftpSortField.modifiedTime, '时间'),
+                  const SizedBox(width: 6),
+                  _buildSortChip(SftpSortField.type, '类型'),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
           Text(
             '$count 项',
-            style: const TextStyle(fontSize: 10.5, color: TxColors.textMuted),
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: TxColors.textSecondary,
+            ),
           ),
+          const SizedBox(width: 6),
+          _buildSortPopupMenuButton(),
         ],
       ),
     );
@@ -2149,24 +2212,31 @@ class SftpManagerPlugin extends TermXPlugin implements DesktopFileDropListener {
   Widget _buildSortChip(SftpSortField field, String label) {
     final active = _sortField == field;
     final arrow = active ? (_sortAscending ? ' ↑' : ' ↓') : '';
-    return InkWell(
-      borderRadius: BorderRadius.circular(4),
-      onTap: () => setSortField(field),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-        decoration: BoxDecoration(
-          color: active ? TxColors.bgElevated : Colors.transparent,
-          borderRadius: BorderRadius.circular(4),
-          border: Border.all(
-            color: active ? TxColors.borderDefault : Colors.transparent,
-          ),
+    return Material(
+      color: active ? TxColors.accentSoft : TxColors.bgChrome,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(6),
+        side: BorderSide(
+          color: active
+              ? TxColors.accent.withValues(alpha: 0.7)
+              : TxColors.borderSubtle,
         ),
-        child: Text(
-          '$label$arrow',
-          style: TextStyle(
-            fontSize: 10.5,
-            fontWeight: active ? FontWeight.w600 : FontWeight.w400,
-            color: active ? TxColors.textPrimary : TxColors.textMuted,
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(6),
+        hoverColor: TxColors.bgHover,
+        onTap: () => setSortField(field),
+        child: Container(
+          height: 30,
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          alignment: Alignment.center,
+          child: Text(
+            '$label$arrow',
+            style: TextStyle(
+              fontSize: 12.5,
+              fontWeight: active ? FontWeight.w600 : FontWeight.w500,
+              color: active ? TxColors.textPrimary : TxColors.textSecondary,
+            ),
           ),
         ),
       ),

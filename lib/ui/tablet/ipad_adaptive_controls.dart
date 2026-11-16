@@ -2,13 +2,21 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../core/theme/ui_tokens.dart';
+import '../mobile/mobile_accessory_keyboard.dart';
 
 /// iPadOS 专属：双手握持分体式拇指悬浮快捷键面板 (Floating Ergonomic Thumb Pads)
 /// 解决 iPad 大屏宽度下双手握持时拇指无法触及屏幕中央按键的痛点，支持自由拖拽位置。
 class IpadFloatingThumbPads extends StatefulWidget {
   final void Function(String rawSequence) onSendRaw;
+  final VirtualModifierController? modifierController;
+  final VoidCallback? onRequestTerminalFocus;
 
-  const IpadFloatingThumbPads({super.key, required this.onSendRaw});
+  const IpadFloatingThumbPads({
+    super.key,
+    required this.onSendRaw,
+    this.modifierController,
+    this.onRequestTerminalFocus,
+  });
 
   @override
   State<IpadFloatingThumbPads> createState() => _IpadFloatingThumbPadsState();
@@ -17,28 +25,80 @@ class IpadFloatingThumbPads extends StatefulWidget {
 class _IpadFloatingThumbPadsState extends State<IpadFloatingThumbPads> {
   Offset _leftOffset = const Offset(16, 180);
   Offset _rightOffset = const Offset(16, 180);
-  bool _ctrlActive = false;
+  VirtualModifierController? _internalModCtrl;
+
+  static const List<String> _ipadCtrlQuickKeys = [
+    'C',
+    'D',
+    'Z',
+    'A',
+    'E',
+    'U',
+    'K',
+    'W',
+    'R',
+    'L',
+    'X',
+    'O',
+  ];
+
+  VirtualModifierController get _mod =>
+      widget.modifierController ?? (_internalModCtrl ??= VirtualModifierController());
+
+  @override
+  void initState() {
+    super.initState();
+    _mod.addListener(_onModifierChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant IpadFloatingThumbPads oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.modifierController != widget.modifierController) {
+      (oldWidget.modifierController ?? _internalModCtrl)
+          ?.removeListener(_onModifierChanged);
+      _mod.addListener(_onModifierChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    _mod.removeListener(_onModifierChanged);
+    _internalModCtrl?.dispose();
+    super.dispose();
+  }
+
+  void _onModifierChanged() {
+    if (mounted) setState(() {});
+  }
 
   void _send(String seq) {
     HapticFeedback.lightImpact();
-    if (_ctrlActive && seq.length == 1) {
-      final code = seq.toUpperCase().codeUnitAt(0);
-      if (code >= 64 && code <= 95) {
-        widget.onSendRaw(String.fromCharCode(code - 64));
-      } else {
-        widget.onSendRaw(seq);
-      }
-      setState(() => _ctrlActive = false);
-      return;
-    }
+    final out = _mod.applyAndConsume(seq);
+    widget.onSendRaw(out);
+    widget.onRequestTerminalFocus?.call();
+  }
+
+  void _sendCtrlCombo(String keyChar) {
+    HapticFeedback.lightImpact();
+    final seq = VirtualModifierController.transformSequence(
+      keyChar,
+      ctrl: true,
+      alt: _mod.isAltActive,
+    );
+    _mod.consumeOneShot();
     widget.onSendRaw(seq);
+    widget.onRequestTerminalFocus?.call();
   }
 
   @override
   Widget build(BuildContext context) {
+    final ctrlActive = _mod.isCtrlActive;
+    final ctrlLocked = _mod.ctrlLocked;
+
     return Stack(
       children: [
-        // 左手拇指扇区：ESC / TAB / CTRL / ^C / 管道符
+        // 左手拇指扇区：ESC / TAB / CTRL / ^C / 管道符 + CTRL 展开组合键
         Positioned(
           left: _leftOffset.dx,
           bottom: _leftOffset.dy,
@@ -53,20 +113,43 @@ class _IpadFloatingThumbPadsState extends State<IpadFloatingThumbPads> {
             },
             child: _buildPadContainer(
               title: '左手拇指区 (可拖拽)',
-              child: Wrap(
-                spacing: 6,
-                runSpacing: 6,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  _padBtn('ESC', () => _send('\x1b'), accent: true),
-                  _padBtn('TAB', () => _send('\t')),
-                  _padBtn(
-                    'CTRL',
-                    () => setState(() => _ctrlActive = !_ctrlActive),
-                    active: _ctrlActive,
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      _padBtn('ESC', () => _send('\x1b'), accent: true),
+                      _padBtn('TAB', () => _send('\t')),
+                      _padBtn(
+                        ctrlLocked ? 'CTRL🔒' : 'CTRL',
+                        () {
+                          _mod.tapCtrl();
+                          widget.onRequestTerminalFocus?.call();
+                        },
+                        active: ctrlActive,
+                      ),
+                      _padBtn('^C', () => _send('\x03'), danger: true),
+                      _padBtn('|', () => _send('|')),
+                      _padBtn('/', () => _send('/')),
+                    ],
                   ),
-                  _padBtn('^C', () => _send('\x03'), danger: true),
-                  _padBtn('|', () => _send('|')),
-                  _padBtn('/', () => _send('/')),
+                  if (ctrlActive) ...[
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 4,
+                      runSpacing: 4,
+                      children: [
+                        for (final k in _ipadCtrlQuickKeys)
+                          _padBtn(
+                            '^$k',
+                            () => _sendCtrlCombo(k),
+                            accent: true,
+                          ),
+                      ],
+                    ),
+                  ],
                 ],
               ),
             ),

@@ -87,23 +87,29 @@ class PortForwardPlugin extends TermXPlugin {
                 border: Border.all(color: TxColors.borderSubtle),
               ),
               child: SwitchListTile(
-                dense: true,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 2,
+                ),
                 value: rule.active,
                 activeThumbColor: TxColors.accent,
                 title: Text(
                   rule.name,
                   style: const TextStyle(
-                    fontSize: 12,
+                    fontSize: 13,
                     fontWeight: FontWeight.w500,
                     color: TxColors.textPrimary,
                   ),
                 ),
-                subtitle: Text(
-                  '${rule.mode}  127.0.0.1:${rule.localPort} -> ${rule.targetHost}:${rule.targetPort}',
-                  style: const TextStyle(
-                    fontFamily: TxColors.monoFamily,
-                    fontSize: 10.5,
-                    color: TxColors.textMuted,
+                subtitle: Padding(
+                  padding: const EdgeInsets.only(top: 3),
+                  child: Text(
+                    '${rule.mode}  127.0.0.1:${rule.localPort} -> ${rule.targetHost}:${rule.targetPort}',
+                    style: const TextStyle(
+                      fontFamily: TxColors.monoFamily,
+                      fontSize: 11.5,
+                      color: TxColors.textMuted,
+                    ),
                   ),
                 ),
                 onChanged: (val) {

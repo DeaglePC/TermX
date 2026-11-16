@@ -99,18 +99,18 @@ class DockerInspectorPlugin extends TermXPlugin {
       itemBuilder: (context, idx) {
         final c = _containers[idx];
         return Container(
-          margin: const EdgeInsets.only(bottom: 6),
+          margin: const EdgeInsets.only(bottom: 8),
           decoration: BoxDecoration(
             color: TxColors.bgPanel,
-            borderRadius: BorderRadius.circular(6),
+            borderRadius: BorderRadius.circular(7),
             border: Border.all(color: TxColors.borderSubtle),
           ),
           child: ListTile(
-            dense: true,
-            visualDensity: VisualDensity.compact,
+            visualDensity: const VisualDensity(horizontal: 0, vertical: -1),
+            contentPadding: const EdgeInsets.only(left: 12, right: 6),
             leading: Container(
-              width: 7,
-              height: 7,
+              width: 8,
+              height: 8,
               decoration: const BoxDecoration(
                 color: TxColors.success,
                 shape: BoxShape.circle,
@@ -119,49 +119,69 @@ class DockerInspectorPlugin extends TermXPlugin {
             title: Text(
               '${c['name']} (${c['image']})',
               style: const TextStyle(
-                fontSize: 12,
+                fontSize: 13,
                 fontWeight: FontWeight.w500,
                 color: TxColors.textPrimary,
               ),
             ),
-            subtitle: Text(
-              '${c['status']}  ·  ${c['ports']}',
-              style: const TextStyle(
-                fontSize: 10.5,
-                fontFamily: TxColors.monoFamily,
-                color: TxColors.textMuted,
+            subtitle: Padding(
+              padding: const EdgeInsets.only(top: 3),
+              child: Text(
+                '${c['status']}  ·  ${c['ports']}',
+                style: const TextStyle(
+                  fontSize: 11.5,
+                  fontFamily: TxColors.monoFamily,
+                  color: TxColors.textMuted,
+                ),
               ),
             ),
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                IconButton(
-                  visualDensity: VisualDensity.compact,
-                  tooltip: '查看容器日志 (docker logs)',
-                  icon: const Icon(
-                    Icons.article_outlined,
-                    size: 15,
-                    color: TxColors.iconDefault,
+                SizedBox(
+                  width: 32,
+                  height: 32,
+                  child: IconButton(
+                    padding: EdgeInsets.zero,
+                    tooltip: '查看容器日志 (docker logs)',
+                    icon: const Icon(
+                      Icons.article_outlined,
+                      size: 17,
+                      color: TxColors.iconDefault,
+                    ),
+                    onPressed: () {
+                      final rawRef = (c['name']?.isNotEmpty ?? false)
+                          ? c['name']!
+                          : (c['id'] ?? '');
+                      if (rawRef.isEmpty) return;
+                      final safeRef =
+                          RegExp(r'^[A-Za-z0-9_.:-]+$').hasMatch(rawRef)
+                          ? rawRef
+                          : "'${rawRef.replaceAll("'", r"'\''")}'";
+                      pluginContext.writeToTerminal(
+                        'docker logs --tail 50 $safeRef',
+                      );
+                    },
                   ),
-                  onPressed: () {
-                    pluginContext.writeToTerminal(
-                      'docker logs --tail 50 ${c['name']}',
-                    );
-                  },
                 ),
-                IconButton(
-                  visualDensity: VisualDensity.compact,
-                  tooltip: '重启容器 (docker restart)',
-                  icon: const Icon(
-                    Icons.refresh_rounded,
-                    size: 15,
-                    color: TxColors.iconDefault,
+                const SizedBox(width: 2),
+                SizedBox(
+                  width: 32,
+                  height: 32,
+                  child: IconButton(
+                    padding: EdgeInsets.zero,
+                    tooltip: '重启容器 (docker restart)',
+                    icon: const Icon(
+                      Icons.refresh_rounded,
+                      size: 17,
+                      color: TxColors.iconDefault,
+                    ),
+                    onPressed: () {
+                      pluginContext.writeToTerminal(
+                        'docker restart ${c['name']}',
+                      );
+                    },
                   ),
-                  onPressed: () {
-                    pluginContext.writeToTerminal(
-                      'docker restart ${c['name']}',
-                    );
-                  },
                 ),
               ],
             ),

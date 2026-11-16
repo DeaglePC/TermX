@@ -62,6 +62,22 @@ class SshSessionController extends ChangeNotifier {
   // iPadOS Stage Manager / Split View 分屏拖拽缩放防抖计时器
   Timer? _resizeDebounceTimer;
 
+  // 终端输入/输出观察者（供命令美化卡片等插件无侵入监听）
+  final List<void Function(String data)> _terminalInputListeners = [];
+  final List<void Function(String chunk)> _terminalOutputListeners = [];
+  final List<VoidCallback> _terminalClearListeners = [];
+
+  /// 可选的软键盘/终端输入修饰转换器（将底部虚拟 CTRL/ALT 组合键同步作用于系统软键盘输入）
+  String Function(String rawData)? inputModifierTransform;
+
+  void _handleTerminalOutput(String data) {
+    final transformed = inputModifierTransform != null
+        ? inputModifierTransform!(data)
+        : data;
+    if (transformed.isEmpty) return;
+    sendRawInput(transformed);
+  }
+
   // Demo 沙盒交互式 Shell 状态
   String _demoCwd = '/root';
   final StringBuffer _demoLineBuffer = StringBuffer();
@@ -104,6 +120,74 @@ class SshSessionController extends ChangeNotifier {
           : host.detectedOsPrettyName,
       terminal = Terminal(maxLines: 10000) {
     _initVirtualFilesystem();
+  }
+
+  void addTerminalInputListener(void Function(String data) listener) {
+    if (!_disposed && !_terminalInputListeners.contains(listener)) {
+      _terminalInputListeners.add(listener);
+    }
+  }
+
+  void removeTerminalInputListener(void Function(String data) listener) {
+    _terminalInputListeners.remove(listener);
+  }
+
+  void addTerminalOutputListener(void Function(String chunk) listener) {
+    if (!_disposed && !_terminalOutputListeners.contains(listener)) {
+      _terminalOutputListeners.add(listener);
+    }
+  }
+
+  void removeTerminalOutputListener(void Function(String chunk) listener) {
+    _terminalOutputListeners.remove(listener);
+  }
+
+  void addTerminalClearListener(VoidCallback listener) {
+    if (!_disposed && !_terminalClearListeners.contains(listener)) {
+      _terminalClearListeners.add(listener);
+    }
+  }
+
+  void removeTerminalClearListener(VoidCallback listener) {
+    _terminalClearListeners.remove(listener);
+  }
+
+  void _notifyTerminalInput(String data) {
+    if (_disposed || _terminalInputListeners.isEmpty) return;
+    for (final listener in List.of(_terminalInputListeners)) {
+      listener(data);
+    }
+  }
+
+  void _notifyTerminalOutput(String chunk) {
+    if (_disposed || _terminalOutputListeners.isEmpty) return;
+    for (final listener in List.of(_terminalOutputListeners)) {
+      listener(chunk);
+    }
+  }
+
+  void _notifyTerminalCleared() {
+    if (_disposed || _terminalClearListeners.isEmpty) return;
+    for (final listener in List.of(_terminalClearListeners)) {
+      listener();
+    }
+  }
+
+  /// 向终端画布写入输出并通知已注册的输出监听插件
+  void writeTerminalOutput(String data) {
+    if (_disposed) return;
+    terminal.write(data);
+    if (data.contains('\x1b[2J') || data.contains('\x1b[3J')) {
+      _notifyTerminalCleared();
+    }
+    _notifyTerminalOutput(data);
+  }
+
+  /// 清空当前终端屏幕与回滚缓冲区并通知插件收起旧浮层
+  void clearTerminalScreen() {
+    if (_disposed) return;
+    terminal.write('\x1b[3J\x1b[2J\x1b[H');
+    _notifyTerminalCleared();
   }
 
   void updateHostMetadata(HostConfig updated) {
@@ -280,24 +364,22 @@ class SshSessionController extends ChangeNotifier {
 
       // 绑定远端 stdout / stderr 到 xterm.dart
       _shellSession!.stdout.listen((Uint8List data) {
-        terminal.write(utf8.decode(data, allowMalformed: true));
+        writeTerminalOutput(utf8.decode(data, allowMalformed: true));
       });
       _shellSession!.stderr.listen((Uint8List data) {
-        terminal.write(utf8.decode(data, allowMalformed: true));
+        writeTerminalOutput(utf8.decode(data, allowMalformed: true));
       });
       _shellSession!.done.then((_) {
         if (_disposed) return;
         _state = SessionConnectionState.disconnected;
         _sftpClient = null;
         _sftpFuture = null;
-        terminal.write('\r\n\x1b[33m[TermX] 远端 SSH 会话已断开。\x1b[0m\r\n');
+        writeTerminalOutput('\r\n\x1b[33m[TermX] 远端 SSH 会话已断开。\x1b[0m\r\n');
         notifyListeners();
       });
 
       // 绑定终端键盘输入与带防抖的 PTY 尺寸缩放 (适配 iPadOS 分屏与台前调度)
-      terminal.onOutput = (String data) {
-        _shellSession?.write(utf8.encode(data));
-      };
+      terminal.onOutput = _handleTerminalOutput;
       terminal.onResize = (int w, int h, int pw, int ph) {
         _resizeDebounceTimer?.cancel();
         _resizeDebounceTimer = Timer(const Duration(milliseconds: 80), () {
@@ -310,14 +392,14 @@ class SshSessionController extends ChangeNotifier {
       unawaited(_detectRemoteOs());
 
       if (host.initCommand != null && host.initCommand!.trim().isNotEmpty) {
-        _shellSession!.write(utf8.encode('${host.initCommand}\n'));
+        sendRawInput('${host.initCommand}\n');
       }
     } catch (e) {
       if (_disposed) return;
       _errorMessage = e.toString();
       _state = SessionConnectionState.error;
       terminal.write(
-        '\r\n\x1b[31m[SSH 连接失败] $e\x1b[0m\r\n右键标签或终端，选择“重新连接 / 重启终端”重试。\r\n',
+        '\r\n\x1b[31m[SSH 连接失败] $e\x1b[0m\r\n点击顶部/下方“重新连接”按钮，或右键标签选择“重新连接 / 重启终端”重试。\r\n',
       );
       _sftpClient?.close();
       _sftpClient = null;
@@ -402,8 +484,8 @@ class SshSessionController extends ChangeNotifier {
       _localOutput = pty.output
           .cast<List<int>>()
           .transform(const Utf8Decoder(allowMalformed: true))
-          .listen(terminal.write);
-      terminal.onOutput = sendRawInput;
+          .listen(writeTerminalOutput);
+      terminal.onOutput = _handleTerminalOutput;
       terminal.onResize = (w, h, pw, ph) {
         if (w > 0 && h > 0) {
           _localPty?.resize(PtySize(rows: h, columns: w));
@@ -455,7 +537,7 @@ class SshSessionController extends ChangeNotifier {
     );
     _writeDemoPrompt();
 
-    terminal.onOutput = _handleDemoTerminalInput;
+    terminal.onOutput = _handleTerminalOutput;
     terminal.onResize = (int w, int h, int pw, int ph) {
       _resizeDebounceTimer?.cancel();
       _resizeDebounceTimer = Timer(const Duration(milliseconds: 80), () {
@@ -466,17 +548,21 @@ class SshSessionController extends ChangeNotifier {
 
   void _writeDemoPrompt() {
     final shortCwd = _demoCwd == '/root' ? '~' : _demoCwd;
-    terminal.write(
+    writeTerminalOutput(
       '\x1b[1;32m${host.username}@${host.name}\x1b[0m:\x1b[1;34m$shortCwd\x1b[0m# ',
     );
   }
 
   void _handleDemoTerminalInput(String data) {
-    for (var i = 0; i < data.length; i++) {
-      final code = data.codeUnitAt(i);
+    final cleaned = data.replaceAll(
+      RegExp(r'\x1B(?:\[[0-?]*[ -/]*[@-~]|O[A-Za-z]|.)'),
+      '',
+    );
+    for (var i = 0; i < cleaned.length; i++) {
+      final code = cleaned.codeUnitAt(i);
       if (code == 13) {
         // Enter
-        terminal.write('\r\n');
+        writeTerminalOutput('\r\n');
         final cmd = _demoLineBuffer.toString().trim();
         _demoLineBuffer.clear();
         if (cmd.isNotEmpty) {
@@ -488,11 +574,42 @@ class SshSessionController extends ChangeNotifier {
       } else if (code == 3) {
         // Ctrl+C
         _demoLineBuffer.clear();
-        terminal.write('^C\r\n');
+        writeTerminalOutput('^C\r\n');
         _writeDemoPrompt();
+      } else if (code == 4) {
+        // Ctrl+D
+        if (_demoLineBuffer.isEmpty) {
+          writeTerminalOutput('logout\r\n');
+          _writeDemoPrompt();
+        }
+      } else if (code == 26) {
+        // Ctrl+Z
+        _demoLineBuffer.clear();
+        writeTerminalOutput('^Z\r\n');
+        _writeDemoPrompt();
+      } else if (code == 21 || code == 11) {
+        // Ctrl+U / Ctrl+K 清空当前行
+        final current = _demoLineBuffer.toString();
+        if (current.isNotEmpty) {
+          _demoLineBuffer.clear();
+          writeTerminalOutput('\b \b' * current.length);
+        }
+      } else if (code == 23) {
+        // Ctrl+W 删除前一个单词
+        final current = _demoLineBuffer.toString();
+        if (current.isNotEmpty) {
+          final next = current.replaceFirst(RegExp(r'\S+\s*$'), '');
+          final removed = current.length - next.length;
+          if (removed > 0) {
+            _demoLineBuffer
+              ..clear()
+              ..write(next);
+            writeTerminalOutput('\b \b' * removed);
+          }
+        }
       } else if (code == 12) {
         // Ctrl+L
-        terminal.write('\x1b[2J\x1b[H');
+        clearTerminalScreen();
         _writeDemoPrompt();
       } else if (code == 127 || code == 8) {
         // Backspace
@@ -500,21 +617,21 @@ class SshSessionController extends ChangeNotifier {
         if (current.isNotEmpty) {
           _demoLineBuffer.clear();
           _demoLineBuffer.write(current.substring(0, current.length - 1));
-          terminal.write('\b \b');
+          writeTerminalOutput('\b \b');
         }
       } else if (code == 9) {
         // Tab 自动补全示例
         final partial = _demoLineBuffer.toString();
         if (partial == 'doc') {
           _demoLineBuffer.write('ker ps');
-          terminal.write('ker ps');
+          writeTerminalOutput('ker ps');
         } else if (partial == ' Sys' || partial == 'sys') {
           _demoLineBuffer.write('temctl status nginx');
-          terminal.write('temctl status nginx');
+          writeTerminalOutput('temctl status nginx');
         }
       } else if (code >= 32) {
-        _demoLineBuffer.write(data[i]);
-        terminal.write(data[i]);
+        _demoLineBuffer.write(cleaned[i]);
+        writeTerminalOutput(cleaned[i]);
       }
     }
   }
@@ -525,15 +642,19 @@ class SshSessionController extends ChangeNotifier {
 
     switch (binary) {
       case 'help':
-        terminal.write(
+        writeTerminalOutput(
           '\x1b[36m可用沙盒交互命令：\x1b[0m\r\n'
-          '  \x1b[33mls / ll\x1b[0m             列出当前目录文件（与右侧 SFTP 插件实时同步！）\r\n'
+          '  \x1b[33mls / ll\x1b[0m             列出当前目录文件（支持美化卡片与 SFTP 同步）\r\n'
           '  \x1b[33mcd <dir>\x1b[0m            切换工作目录\r\n'
           '  \x1b[33mcat <file>\x1b[0m          查看文件内容\r\n'
           '  \x1b[33mtouch <file>\x1b[0m        创建新文件（可立即在 SFTP 面板看到）\r\n'
-          '  \x1b[33mdocker ps\x1b[0m           查看运行中的容器状态\r\n'
-          '  \x1b[33mtop / htop\x1b[0m          打印系统实时负载快照\r\n'
-          '  \x1b[33mdf -h\x1b[0m               查看磁盘挂载使用率\r\n'
+          '  \x1b[33mdocker ps / stats\x1b[0m   查看运行容器状态 / 资源监控\r\n'
+          '  \x1b[33mkubectl get pods\x1b[0m    查看 Kubernetes Pod 状态\r\n'
+          '  \x1b[33mtop / htop / ps\x1b[0m     打印系统负载与进程快照\r\n'
+          '  \x1b[33mdf -h / free -h\x1b[0m     查看磁盘挂载与内存使用率\r\n'
+          '  \x1b[33mss -tulnp / ip a\x1b[0m    查看监听端口与网络接口\r\n'
+          '  \x1b[33msystemctl / git\x1b[0m     查看系统服务或 Git 状态\r\n'
+          '  \x1b[33mnvidia-smi / ping\x1b[0m   查看 GPU 状态或连通性测试\r\n'
           '  \x1b[33muname -a\x1b[0m            查看内核版本信息\r\n'
           '  \x1b[33mclear\x1b[0m               清屏\r\n',
         );
@@ -541,15 +662,16 @@ class SshSessionController extends ChangeNotifier {
       case 'ls':
       case 'll':
         final entries = _virtualFs[_demoCwd] ?? const [];
+        writeTerminalOutput('total ${entries.length * 4}\r\n');
         for (final item in entries) {
           final color = item.isDirectory ? '\x1b[1;34m' : '\x1b[0m';
-          terminal.write(
-            '${item.permissions}  1 root root ${item.sizeBytes.toString().padLeft(8)}  $color${item.name}\x1b[0m\r\n',
+          writeTerminalOutput(
+            '${item.permissions}  1 root root ${item.sizeBytes.toString().padLeft(8)} Nov 15 14:20 $color${item.name}\x1b[0m\r\n',
           );
         }
         break;
       case 'pwd':
-        terminal.write('$_demoCwd\r\n');
+        writeTerminalOutput('$_demoCwd\r\n');
         break;
       case 'cd':
         final target = parts.length > 1 ? parts[1] : '/root';
@@ -564,24 +686,28 @@ class SshSessionController extends ChangeNotifier {
           if (_virtualFs.containsKey(candidate)) {
             _demoCwd = candidate;
           } else {
-            terminal.write('bash: cd: $target: No such file or directory\r\n');
+            writeTerminalOutput(
+              'bash: cd: $target: No such file or directory\r\n',
+            );
           }
         }
         notifyListeners();
         break;
       case 'cat':
         if (parts.length < 2) {
-          terminal.write('Usage: cat <filename>\r\n');
+          writeTerminalOutput('Usage: cat <filename>\r\n');
         } else {
           final fileName = parts[1];
           final entries = _virtualFs[_demoCwd] ?? const [];
           final match = entries.where((e) => e.name == fileName).toList();
           if (match.isEmpty) {
-            terminal.write('cat: $fileName: No such file or directory\r\n');
+            writeTerminalOutput(
+              'cat: $fileName: No such file or directory\r\n',
+            );
           } else if (match.first.isDirectory) {
-            terminal.write('cat: $fileName: Is a directory\r\n');
+            writeTerminalOutput('cat: $fileName: Is a directory\r\n');
           } else {
-            terminal.write(
+            writeTerminalOutput(
               '${(match.first.textContent ?? '').replaceAll('\n', '\r\n')}\r\n',
             );
           }
@@ -608,40 +734,191 @@ class SshSessionController extends ChangeNotifier {
         }
         break;
       case 'uname':
-        terminal.write(
+        writeTerminalOutput(
           'Linux ${host.name} 6.8.0-48-generic #48-Ubuntu SMP PREEMPT_DYNAMIC x86_64 GNU/Linux\r\n',
         );
         break;
       case 'df':
-        terminal.write(
+        writeTerminalOutput(
           'Filesystem      Size  Used Avail Use% Mounted on\r\n'
           '/dev/vda1       120G   46G   74G  39% /\r\n'
           '/dev/vdb1       500G  435G   65G  87% /data/storage\r\n'
           'tmpfs           7.9G  1.2M  7.9G   1% /run\r\n',
         );
         break;
+      case 'du':
+        writeTerminalOutput(
+          '18.4G\t/data/storage/backups\r\n'
+          '6.2G\t/data/storage/postgres\r\n'
+          '1.8G\t/var/lib/docker\r\n'
+          '420M\t/root/logs\r\n',
+        );
+        break;
+      case 'free':
+        writeTerminalOutput(
+          '               total        used        free      shared  buff/cache   available\r\n'
+          'Mem:           15.6Gi       6.2Gi       4.7Gi       128Mi       4.7Gi       9.1Gi\r\n'
+          'Swap:          4.0Gi       256Mi       3.8Gi\r\n',
+        );
+        break;
       case 'docker':
-        terminal.write(
-          'CONTAINER ID   IMAGE            COMMAND                  STATUS          PORTS                    NAMES\r\n'
-          'a81f940b2c19   nginx:alpine     "/docker-entrypoint.…"   Up 14 days      0.0.0.0:443->443/tcp     api-gateway\r\n'
-          '79c20e1b55d1   redis:7-alpine   "docker-entrypoint.s…"   Up 14 days      0.0.0.0:6379->6379/tcp   redis-cache\r\n'
-          '3e19a8410f02   postgres:16      "docker-entrypoint.s…"   Up 9 days       5432/tcp                 pg-primary\r\n',
+        final sub = parts.length > 1 ? parts[1] : 'ps';
+        if (sub == 'images') {
+          writeTerminalOutput(
+            'REPOSITORY      TAG          IMAGE ID       CREATED        SIZE\r\n'
+            'nginx           alpine       cc44224bfe20   2 weeks ago    43.2MB\r\n'
+            'redis           7-alpine     8c9f08f89a11   3 weeks ago    34.8MB\r\n'
+            'postgres        16           2f418f10d8e4   4 weeks ago    432MB\r\n',
+          );
+        } else if (sub == 'stats') {
+          writeTerminalOutput(
+            'CONTAINER ID   NAME          CPU %     MEM USAGE / LIMIT     MEM %     NET I/O           BLOCK I/O        PIDS\r\n'
+            'a81f940b2c19   api-gateway   4.28%     68.4MiB / 15.62GiB    0.43%     1.42GB / 980MB    12.4MB / 0B      12\r\n'
+            '79c20e1b55d1   redis-cache   2.15%     142.8MiB / 2GiB       6.97%     845MB / 612MB     4.1MB / 88MB     6\r\n'
+            '3e19a8410f02   pg-primary    11.60%    1.24GiB / 8GiB        15.50%    412MB / 520MB     1.8GB / 4.2GB    28\r\n',
+          );
+        } else if (sub == 'logs') {
+          final target = parts.length > 2 ? parts.last : 'api-gateway';
+          writeTerminalOutput(
+            '2026-11-15T19:40:01.104Z [INFO] [$target] worker process ready (pid=1)\r\n'
+            '2026-11-15T19:40:12.482Z [INFO] [$target] healthcheck /readyz -> 200 OK (1.2ms)\r\n'
+            '2026-11-15T19:40:28.915Z [INFO] [$target] upstream keepalive pool active=4 idle=12\r\n',
+          );
+        } else {
+          writeTerminalOutput(
+            'CONTAINER ID   IMAGE            COMMAND                  STATUS          PORTS                    NAMES\r\n'
+            'a81f940b2c19   nginx:alpine     "/docker-entrypoint.…"   Up 14 days      0.0.0.0:443->443/tcp     api-gateway\r\n'
+            '79c20e1b55d1   redis:7-alpine   "docker-entrypoint.s…"   Up 14 days      0.0.0.0:6379->6379/tcp   redis-cache\r\n'
+            '3e19a8410f02   postgres:16      "docker-entrypoint.s…"   Up 9 days       5432/tcp                 pg-primary\r\n',
+          );
+        }
+        break;
+      case 'kubectl':
+        writeTerminalOutput(
+          'NAMESPACE     NAME                               READY   STATUS    RESTARTS   AGE\r\n'
+          'prod          api-gateway-7c8d94f6b-9xk2p        1/1     Running   0          14d\r\n'
+          'prod          worker-billing-5f9b8c7d4-m4v8q     2/2     Running   1          9d\r\n'
+          'monitoring    prometheus-server-0                2/2     Running   0          31d\r\n',
         );
         break;
       case 'top':
       case 'htop':
-        terminal.write(
+        writeTerminalOutput(
           'top - 15:42:10 up 42 days,  6:18,  1 user,  load average: 0.48, 0.39, 0.31\r\n'
           'Tasks: 148 total,   1 running, 147 sleeping,   0 stopped,   0 zombie\r\n'
           '%Cpu(s): 18.4 us,  4.2 sy,  0.0 ni, 76.8 id,  0.4 wa,  0.0 hi,  0.2 si\r\n'
-          'MiB Mem :  16384.0 total,   4820.5 free,   6412.2 used,   5151.3 buff/cache\r\n',
+          'MiB Mem :  16384.0 total,   4820.5 free,   6412.2 used,   5151.3 buff/cache\r\n'
+          'MiB Swap:   4096.0 total,   3840.0 free,    256.0 used.   9420.8 avail Mem\r\n'
+          '\r\n'
+          '  PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND\r\n'
+          ' 2190 postgres  20   0 1420800 312400  98200 S  11.6   1.9  84:12.40 postgres\r\n'
+          ' 1042 www-data  20   0  284120  68400  24100 S   8.4   0.4  41:08.15 nginx\r\n'
+          ' 1884 redis     20   0  198400 142800  12400 S   3.8   0.9  19:54.02 redis-server\r\n'
+          ' 3412 root      20   0 1894000 112600  56000 S   2.2   0.7  15:20.88 dockerd\r\n',
+        );
+        break;
+      case 'ps':
+        writeTerminalOutput(
+          'USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND\r\n'
+          'postgres    2190 11.6  1.9 1420800 312400 ?      Ss   Nov01  84:12 postgres: walwriter\r\n'
+          'www-data    1042  8.4  0.4 284120  68400 ?       S    Nov01  41:08 nginx: worker process\r\n'
+          'redis       1884  3.8  0.9 198400 142800 ?       Ssl  Nov01  19:54 /usr/bin/redis-server *:6379\r\n'
+          'root        3412  2.2  0.7 1894000 112600 ?      Ssl  Nov01  15:20 /usr/bin/dockerd -H fd://\r\n',
+        );
+        break;
+      case 'ss':
+      case 'netstat':
+        writeTerminalOutput(
+          'Netid  State   Recv-Q  Send-Q   Local Address:Port    Peer Address:Port  Process\r\n'
+          'tcp    LISTEN  0       4096     0.0.0.0:443           0.0.0.0:*          users:(("nginx",pid=1042,fd=6))\r\n'
+          'tcp    LISTEN  0       128      0.0.0.0:22            0.0.0.0:*          users:(("sshd",pid=812,fd=3))\r\n'
+          'tcp    LISTEN  0       511      127.0.0.1:6379        0.0.0.0:*          users:(("redis-server",pid=1884,fd=7))\r\n'
+          'tcp    LISTEN  0       244      127.0.0.1:5432        0.0.0.0:*          users:(("postgres",pid=2190,fd=5))\r\n',
+        );
+        break;
+      case 'ip':
+      case 'ifconfig':
+        writeTerminalOutput(
+          '1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 state UNKNOWN\r\n'
+          '    inet 127.0.0.1/8 scope host lo\r\n'
+          '2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\r\n'
+          '    link/ether 52:54:00:4a:9c:12 brd ff:ff:ff:ff:ff:ff\r\n'
+          '    inet ${host.host}/24 brd 192.168.1.255 scope global eth0\r\n',
+        );
+        break;
+      case 'systemctl':
+        if (parts.length >= 3 && parts[1] == 'status') {
+          final svc = parts[2];
+          writeTerminalOutput(
+            '● $svc.service - High Performance Service ($svc)\r\n'
+            '     Loaded: loaded (/lib/systemd/system/$svc.service; enabled; preset: enabled)\r\n'
+            '     Active: active (running) since Sat 2026-11-01 09:24:10 CST; 14 days ago\r\n'
+            '   Main PID: 1042 ($svc)\r\n'
+            '      Tasks: 9 (limit: 19122)\r\n'
+            '     Memory: 68.4M\r\n',
+          );
+        } else {
+          writeTerminalOutput(
+            'UNIT                     LOAD   ACTIVE SUB     DESCRIPTION\r\n'
+            'nginx.service            loaded active running A high performance web server\r\n'
+            'docker.service           loaded active running Docker Application Container Engine\r\n'
+            'postgresql.service       loaded active running PostgreSQL RDBMS\r\n'
+            'ssh.service              loaded active running OpenBSD Secure Shell server\r\n',
+          );
+        }
+        break;
+      case 'git':
+        final sub = parts.length > 1 ? parts[1] : 'status';
+        if (sub == 'log') {
+          writeTerminalOutput(
+            'a94e8c1 (HEAD -> main, origin/main) feat: add smart command output beautifier cards\r\n'
+            '6d12f4b fix(sftp): preserve detected OS icon across host edits\r\n'
+            '3b89a0c refactor(ui): adopt neutral carbon dark tokens\r\n',
+          );
+        } else {
+          writeTerminalOutput(
+            'On branch main\r\n'
+            'Your branch is up to date with \'origin/main\'.\r\n'
+            'Changes to be committed:\r\n'
+            '  modified:   docker-compose.yml\r\n'
+            'Changes not staged for commit:\r\n'
+            '  modified:   deploy.sh\r\n'
+            'Untracked files:\r\n'
+            '  logs/audit.log\r\n',
+          );
+        }
+        break;
+      case 'nvidia-smi':
+        writeTerminalOutput(
+          '+-----------------------------------------------------------------------------------------+\r\n'
+          '| NVIDIA-SMI 550.90.07              Driver Version: 550.90.07      CUDA Version: 12.4     |\r\n'
+          '|-----------------------------------------+------------------------+----------------------+\r\n'
+          '| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |\r\n'
+          '| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |\r\n'
+          '|=========================================+========================+======================|\r\n'
+          '|   0  NVIDIA A100-SXM4-80GB          On  |   00000000:00:04.0 Off |                    0 |\r\n'
+          '| N/A   46C    P0             182W / 400W |   48620MiB / 81920MiB |     74%      Default |\r\n'
+          '+-----------------------------------------+------------------------+----------------------+\r\n',
+        );
+        break;
+      case 'ping':
+        final target = parts.length > 1 ? parts.last : '1.1.1.1';
+        writeTerminalOutput(
+          'PING $target ($target) 56(84) bytes of data.\r\n'
+          '64 bytes from $target: icmp_seq=1 ttl=57 time=11.4 ms\r\n'
+          '64 bytes from $target: icmp_seq=2 ttl=57 time=12.1 ms\r\n'
+          '64 bytes from $target: icmp_seq=3 ttl=57 time=10.8 ms\r\n'
+          '64 bytes from $target: icmp_seq=4 ttl=57 time=11.9 ms\r\n'
+          '--- $target ping statistics ---\r\n'
+          '4 packets transmitted, 4 received, 0% packet loss, time 3005ms\r\n'
+          'rtt min/avg/max/mdev = 10.800/11.550/12.100/0.502 ms\r\n',
         );
         break;
       case 'clear':
-        terminal.write('\x1b[2J\x1b[H');
+        clearTerminalScreen();
         break;
       default:
-        terminal.write('\x1b[32m[Executed]\x1b[0m $cmd\r\n');
+        writeTerminalOutput('\x1b[32m[Executed]\x1b[0m $cmd\r\n');
     }
     _writeDemoPrompt();
   }
@@ -649,13 +926,14 @@ class SshSessionController extends ChangeNotifier {
   /// 向当前终端注入按键或命令（供手机虚拟键盘栏、iPad 悬浮键盘球、Snippets 插件调用）
   void sendRawInput(String data) {
     if (_disposed || _state != SessionConnectionState.connected) return;
+    _notifyTerminalInput(data);
     if (isLocalSession) {
       final pty = _localPty;
       if (pty != null) {
         unawaited(
           pty.input.writeUtf8(data).catchError((Object error) {
             if (!_disposed && _localPty != null) {
-              terminal.write('\r\n[TermX] 本地终端写入失败：$error\r\n');
+              writeTerminalOutput('\r\n[TermX] 本地终端写入失败：$error\r\n');
             }
           }),
         );
@@ -1183,6 +1461,9 @@ class SshSessionController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _terminalInputListeners.clear();
+    _terminalOutputListeners.clear();
+    _terminalClearListeners.clear();
     terminal.onOutput = null;
     terminal.onResize = null;
     _localOutput?.cancel();
