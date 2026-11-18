@@ -134,6 +134,8 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
       (_workspace.activeTab?.root.paneIds.length ?? 0) > 1;
   bool _ipadThumbPadsVisible = true;
   bool _capsLockRemappedToEsc = true;
+  MobileNavSection _mobileNavSection = MobileNavSection.terminal;
+  String _mobileActiveToolPluginId = SnippetsPlugin.pluginId;
 
   SshSessionController? get _activeSession => _workspace.activePane?.session;
 
@@ -978,6 +980,9 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
 
   Future<void> _openNewSession(HostConfig host) async {
     if (!mounted) return;
+    if (_mobileNavSection != MobileNavSection.terminal) {
+      setState(() => _mobileNavSection = MobileNavSection.terminal);
+    }
     await _connectPane(_workspace.open(host));
   }
 
@@ -1331,66 +1336,256 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
       requestOpenPanel: (pluginId) {
         _pluginManager.setActivePanelPlugin(pluginId);
         if (layoutMode == AdaptiveLayoutMode.compact) {
-          _openMobilePluginBottomSheet(pluginId);
+          setState(() {
+            if (pluginId == SftpManagerPlugin.pluginId) {
+              _mobileNavSection = MobileNavSection.sftp;
+            } else if (pluginId == ServerMonitorPlugin.pluginId) {
+              _mobileNavSection = MobileNavSection.monitor;
+            } else {
+              _mobileActiveToolPluginId = pluginId;
+              _mobileNavSection = MobileNavSection.tools;
+            }
+          });
         }
       },
     );
   }
 
-  void _openMobilePluginBottomSheet(String pluginId) {
-    _pluginManager.setActivePanelPlugin(pluginId);
-    final plugin = _pluginManager.activePanelPlugin;
-    if (plugin == null) return;
-    final pluginContext = _buildPluginContext(AdaptiveLayoutMode.compact);
-
+  void _openMobileVerticalTabsSheet() {
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      backgroundColor: TxColors.bgSidebar,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
-      ),
-      builder: (ctx) => DraggableScrollableSheet(
-        expand: false,
-        initialChildSize: 0.72,
-        minChildSize: 0.42,
-        maxChildSize: 0.94,
-        builder: (ctx, scrollController) => SafeArea(
-          top: false,
-          child: Column(
-            children: [
-              Container(
-                margin: const EdgeInsets.only(top: 8, bottom: 4),
-                width: 36,
-                height: 3.5,
-                decoration: BoxDecoration(
-                  color: TxColors.borderStrong,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              _buildPluginSelectorHeader(pluginContext, isCompactSheet: true),
-              Expanded(
-                child: ListenableBuilder(
-                  listenable: _pluginManager,
-                  builder: (ctx, _) {
-                    final current = _pluginManager.activePanelPlugin;
-                    if (current == null) {
-                      return const Center(child: Text('未选择插件'));
-                    }
-                    return Material(
-                      color: TxColors.bgSidebar,
-                      child:
-                          current.buildPanelWidget(ctx, pluginContext) ??
-                          const SizedBox.shrink(),
+      backgroundColor: Colors.transparent,
+      builder: (sheetCtx) => ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(sheetCtx).height * 0.78,
+        ),
+        child: ListenableBuilder(
+          listenable: _workspace,
+          builder: (ctx, _) {
+            final entries = <MobileVerticalTabEntry>[
+              for (final tab in _workspace.tabs)
+                Builder(
+                  builder: (_) {
+                    final pane = _workspace.panes[tab.focusedPaneId]!;
+                    final session = pane.session;
+                    final isDisconnected =
+                        session.state == SessionConnectionState.disconnected ||
+                        session.state == SessionConnectionState.error;
+                    final subtitle = session.isLocalSession
+                        ? '本地终端 · ${session.host.username}'
+                        : '${session.host.username}@${session.host.host}:${session.host.port}';
+                    return MobileVerticalTabEntry(
+                      id: tab.id,
+                      title: _workspace.title(tab),
+                      subtitle: subtitle,
+                      statusBadge: SessionOsStatusBadge(
+                        session: session,
+                        size: 18,
+                      ),
+                      active: tab == _workspace.activeTab,
+                      isDisconnected: isDisconnected,
+                      paneCount: tab.root.paneIds.length,
+                      customColor: tab.customColor,
+                      onSelect: () {
+                        _workspace.activate(tab);
+                        setState(
+                          () => _mobileNavSection = MobileNavSection.terminal,
+                        );
+                        Navigator.of(sheetCtx).pop();
+                      },
+                      onReconnect: () => _restartPane(tab, tab.focusedPaneId),
+                      onRename: () => _renameTab(tab),
+                      onClose: () {
+                        _workspace.closeTab(tab);
+                        if (_workspace.tabs.isEmpty &&
+                            Navigator.of(sheetCtx).canPop()) {
+                          Navigator.of(sheetCtx).pop();
+                        }
+                      },
                     );
                   },
                 ),
+            ];
+            return MobileVerticalTabsSheet(
+              entries: entries,
+              accentColor: _colorPalette.accentColor,
+              onReorder: _workspace.reorder,
+              onNewSession: () {
+                Navigator.of(sheetCtx).pop();
+                setState(() => _mobileNavSection = MobileNavSection.terminal);
+                _newLocalTab();
+              },
+              onBrowseHosts: () {
+                Navigator.of(sheetCtx).pop();
+                setState(() => _mobileNavSection = MobileNavSection.hosts);
+              },
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMobileInlinePluginPage(
+    String pluginId,
+    PluginContext pluginContext,
+  ) {
+    return ListenableBuilder(
+      listenable: _pluginManager,
+      builder: (context, _) {
+        final plugin = _pluginManager.enabledPlugins
+            .where((p) => p.manifest.id == pluginId)
+            .firstOrNull;
+        if (plugin == null) {
+          return Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(
+                  Icons.extension_off_outlined,
+                  size: 30,
+                  color: TxColors.textMuted,
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  '该功能插件当前未启用',
+                  style: TextStyle(fontSize: 13, color: TxColors.textSecondary),
+                ),
+                const SizedBox(height: 10),
+                FilledButton.tonal(
+                  onPressed: () =>
+                      _openPluginManagerSheetOrDialog(pluginContext),
+                  child: const Text('管理扩展插件'),
+                ),
+              ],
+            ),
+          );
+        }
+        return Material(
+          color: TxColors.bgSidebar,
+          child:
+              plugin.buildPanelWidget(context, pluginContext) ??
+              const SizedBox.shrink(),
+        );
+      },
+    );
+  }
+
+  Widget _buildMobileToolsPage(PluginContext pluginContext) {
+    const toolPluginIds = <String>[
+      SnippetsPlugin.pluginId,
+      PortForwardPlugin.pluginId,
+      CommandBeautifierPlugin.pluginId,
+      DockerInspectorPlugin.pluginId,
+    ];
+    return ListenableBuilder(
+      listenable: _pluginManager,
+      builder: (context, _) {
+        final availableToolPlugins = _pluginManager.enabledPlugins
+            .where((p) => toolPluginIds.contains(p.manifest.id))
+            .toList(growable: false);
+        final activeToolPlugin =
+            availableToolPlugins
+                .where((p) => p.manifest.id == _mobileActiveToolPluginId)
+                .firstOrNull ??
+            availableToolPlugins.firstOrNull;
+
+        return Material(
+          color: TxColors.bgSidebar,
+          child: Column(
+            children: [
+              // 顶部简洁分段切换栏 + 系统级快捷设置入口
+              Container(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+                decoration: const BoxDecoration(
+                  color: TxColors.bgChrome,
+                  border: Border(
+                    bottom: BorderSide(color: TxColors.borderSubtle),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          for (final p in availableToolPlugins)
+                            Padding(
+                              padding: const EdgeInsets.only(right: 6),
+                              child: ChoiceChip(
+                                visualDensity: VisualDensity.compact,
+                                selected:
+                                    activeToolPlugin?.manifest.id ==
+                                    p.manifest.id,
+                                onSelected: (_) => setState(
+                                  () =>
+                                      _mobileActiveToolPluginId = p.manifest.id,
+                                ),
+                                avatar: Icon(p.manifest.icon, size: 15),
+                                label: Text(
+                                  _shortPluginTitle(p.manifest),
+                                  style: const TextStyle(fontSize: 12),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          _buildOpacityPresetChip(
+                            label: '配色与光标',
+                            selected: false,
+                            onTap: _openMobilePaletteAndCursorSheet,
+                          ),
+                          const SizedBox(width: 6),
+                          _buildOpacityPresetChip(
+                            label: '凭据保险箱',
+                            selected: false,
+                            onTap: () => showKeychainVaultDialog(
+                              context: context,
+                              vaultService: _vaultService,
+                              hosts: _hosts,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          _buildOpacityPresetChip(
+                            label: '外接键盘快捷键',
+                            selected: false,
+                            onTap: _openShortcutSettings,
+                          ),
+                          const SizedBox(width: 6),
+                          _buildOpacityPresetChip(
+                            label: '扩展管理',
+                            selected: false,
+                            onTap: () =>
+                                _openPluginManagerSheetOrDialog(pluginContext),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: activeToolPlugin != null
+                    ? (activeToolPlugin.buildPanelWidget(
+                            context,
+                            pluginContext,
+                          ) ??
+                          const SizedBox.shrink())
+                    : const Center(child: Text('暂无启用的工具插件')),
               ),
             ],
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
@@ -1639,114 +1834,151 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
                     child: SafeArea(
                       top: false,
                       bottom: false,
-                      child: Row(
-                        children: [
-                          // 1. 左侧服务器会话树
-                          if (layoutMode == AdaptiveLayoutMode.expanded &&
-                              !_leftSidebarCollapsed)
-                            SizedBox(
-                              width: 248,
-                              child: _buildHostSidebar(layoutMode),
+                      child: layoutMode == AdaptiveLayoutMode.compact
+                          ? IndexedStack(
+                              index: _mobileNavSection.index,
+                              sizing: StackFit.expand,
+                              children: [
+                                _buildCenterTerminalArea(
+                                  layoutMode,
+                                  pluginContext,
+                                ),
+                                _buildHostSidebar(layoutMode),
+                                _buildMobileInlinePluginPage(
+                                  SftpManagerPlugin.pluginId,
+                                  pluginContext,
+                                ),
+                                _buildMobileInlinePluginPage(
+                                  ServerMonitorPlugin.pluginId,
+                                  pluginContext,
+                                ),
+                                _buildMobileToolsPage(pluginContext),
+                              ],
                             )
-                          else if (layoutMode == AdaptiveLayoutMode.medium)
-                            _buildTabletNavigationRail(),
+                          : Row(
+                              children: [
+                                // 1. 左侧服务器会话树
+                                if (layoutMode == AdaptiveLayoutMode.expanded &&
+                                    !_leftSidebarCollapsed)
+                                  SizedBox(
+                                    width: 248,
+                                    child: _buildHostSidebar(layoutMode),
+                                  )
+                                else if (layoutMode ==
+                                    AdaptiveLayoutMode.medium)
+                                  _buildTabletNavigationRail(),
 
-                          // 2. 中间核心终端区
-                          Expanded(
-                            child: _buildCenterTerminalArea(
-                              layoutMode,
-                              pluginContext,
-                            ),
-                          ),
+                                // 2. 中间核心终端区
+                                Expanded(
+                                  child: _buildCenterTerminalArea(
+                                    layoutMode,
+                                    pluginContext,
+                                  ),
+                                ),
 
-                          // 3. 右侧辅助检查器面板
-                          if (layoutMode != AdaptiveLayoutMode.compact)
-                            RepaintBoundary(
-                              child: ListenableBuilder(
-                                listenable: _pluginManager,
-                                builder: (context, _) {
-                                  final activePlugin =
-                                      _pluginManager.activePanelPlugin;
-                                  if (activePlugin == null) {
-                                    return const SizedBox.shrink();
-                                  }
-                                  final defaultPanelWidth =
-                                      layoutMode == AdaptiveLayoutMode.expanded
-                                      ? (constraints.maxWidth >= 1320
-                                            ? 430.0
-                                            : 398.0)
-                                      : 346.0;
-                                  final leftOccupied =
-                                      layoutMode == AdaptiveLayoutMode.expanded
-                                      ? (_leftSidebarCollapsed ? 0.0 : 248.0)
-                                      : 58.0;
-                                  const minPanelWidth = 330.0;
-                                  final maxPanelWidth =
-                                      (constraints.maxWidth -
-                                              leftOccupied -
-                                              260.0)
-                                          .clamp(350.0, 920.0);
-                                  final panelContent = Column(
-                                    children: [
-                                      _buildPluginSelectorHeader(pluginContext),
-                                      Expanded(
-                                        child:
-                                            activePlugin.buildPanelWidget(
-                                              context,
-                                              pluginContext,
-                                            ) ??
-                                            const SizedBox.shrink(),
-                                      ),
-                                    ],
-                                  );
-                                  return ValueListenableBuilder<double?>(
-                                    valueListenable: _rightPanelWidthNotifier,
-                                    child: panelContent,
-                                    builder: (context, customWidth, panelChild) {
-                                      final panelWidth =
-                                          (customWidth ?? defaultPanelWidth)
-                                              .clamp(
-                                                minPanelWidth,
-                                                maxPanelWidth,
-                                              );
-                                      return Row(
-                                        mainAxisSize: MainAxisSize.min,
+                                // 3. 右侧辅助检查器面板
+                                RepaintBoundary(
+                                  child: ListenableBuilder(
+                                    listenable: _pluginManager,
+                                    builder: (context, _) {
+                                      final activePlugin =
+                                          _pluginManager.activePanelPlugin;
+                                      if (activePlugin == null) {
+                                        return const SizedBox.shrink();
+                                      }
+                                      final defaultPanelWidth =
+                                          layoutMode ==
+                                              AdaptiveLayoutMode.expanded
+                                          ? (constraints.maxWidth >= 1320
+                                                ? 430.0
+                                                : 398.0)
+                                          : 346.0;
+                                      final leftOccupied =
+                                          layoutMode ==
+                                              AdaptiveLayoutMode.expanded
+                                          ? (_leftSidebarCollapsed
+                                                ? 0.0
+                                                : 248.0)
+                                          : 58.0;
+                                      const minPanelWidth = 330.0;
+                                      final maxPanelWidth =
+                                          (constraints.maxWidth -
+                                                  leftOccupied -
+                                                  260.0)
+                                              .clamp(350.0, 920.0);
+                                      final panelContent = Column(
                                         children: [
-                                          _RightPanelResizeHandle(
-                                            key: const ValueKey(
-                                              'right_panel_resize_handle',
-                                            ),
-                                            currentWidth: panelWidth,
-                                            minWidth: minPanelWidth,
-                                            maxWidth: maxPanelWidth,
-                                            onWidthChanged: (next) {
-                                              _rightPanelWidthNotifier.value =
-                                                  next;
-                                            },
-                                            onDragEnd: _persistUiPreferences,
-                                            onResetDefault: () {
-                                              _rightPanelWidthNotifier.value =
-                                                  null;
-                                              _persistUiPreferences();
-                                            },
+                                          _buildPluginSelectorHeader(
+                                            pluginContext,
                                           ),
-                                          SizedBox(
-                                            key: _rightPanelBoundsKey,
-                                            width: panelWidth - 7,
-                                            child: Material(
-                                              color: TxColors.bgSidebar,
-                                              child: panelChild,
-                                            ),
+                                          Expanded(
+                                            child:
+                                                activePlugin.buildPanelWidget(
+                                                  context,
+                                                  pluginContext,
+                                                ) ??
+                                                const SizedBox.shrink(),
                                           ),
                                         ],
                                       );
+                                      return ValueListenableBuilder<double?>(
+                                        valueListenable:
+                                            _rightPanelWidthNotifier,
+                                        child: panelContent,
+                                        builder:
+                                            (
+                                              context,
+                                              customWidth,
+                                              panelChild,
+                                            ) {
+                                              final panelWidth =
+                                                  (customWidth ??
+                                                          defaultPanelWidth)
+                                                      .clamp(
+                                                        minPanelWidth,
+                                                        maxPanelWidth,
+                                                      );
+                                              return Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  _RightPanelResizeHandle(
+                                                    key: const ValueKey(
+                                                      'right_panel_resize_handle',
+                                                    ),
+                                                    currentWidth: panelWidth,
+                                                    minWidth: minPanelWidth,
+                                                    maxWidth: maxPanelWidth,
+                                                    onWidthChanged: (next) {
+                                                      _rightPanelWidthNotifier
+                                                              .value =
+                                                          next;
+                                                    },
+                                                    onDragEnd:
+                                                        _persistUiPreferences,
+                                                    onResetDefault: () {
+                                                      _rightPanelWidthNotifier
+                                                              .value =
+                                                          null;
+                                                      _persistUiPreferences();
+                                                    },
+                                                  ),
+                                                  SizedBox(
+                                                    key: _rightPanelBoundsKey,
+                                                    width: panelWidth - 7,
+                                                    child: Material(
+                                                      color: TxColors.bgSidebar,
+                                                      child: panelChild,
+                                                    ),
+                                                  ),
+                                                ],
+                                              );
+                                            },
+                                      );
                                     },
-                                  );
-                                },
-                              ),
+                                  ),
+                                ),
+                              ],
                             ),
-                        ],
-                      ),
                     ),
                   ),
 
@@ -1765,8 +1997,9 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
                       isSplitTerminal: _isSplitTerminal,
                     ),
 
-                  // 手机端专属：双层可滑动虚拟扩展键盘栏 + 本地防抖草稿箱
-                  if (layoutMode == AdaptiveLayoutMode.compact)
+                  // 手机端专属：Termius 极简风格单行虚拟扩展键盘栏（仅在终端视图下显示）
+                  if (layoutMode == AdaptiveLayoutMode.compact &&
+                      _mobileNavSection == MobileNavSection.terminal)
                     ListenableBuilder(
                       listenable: Listenable.merge([
                         _beautifierPlugin,
@@ -1801,15 +2034,6 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
                                 ),
                           isDisconnected: isDisconnected,
                           onSendRaw: (seq) => _activeSession?.sendRawInput(seq),
-                          onOpenSftp: () => _openMobilePluginBottomSheet(
-                            SftpManagerPlugin.pluginId,
-                          ),
-                          onOpenMonitor: () => _openMobilePluginBottomSheet(
-                            ServerMonitorPlugin.pluginId,
-                          ),
-                          onOpenBeautifier: () => _openMobilePluginBottomSheet(
-                            CommandBeautifierPlugin.pluginId,
-                          ),
                           beautifierCardCount: cardCount,
                           beautifierShowingCard: showingCard,
                           onToggleBeautifierMode: sessionId == null
@@ -1817,23 +2041,27 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
                               : () => _beautifierPlugin.toggleSessionDisplayMode(
                                   sessionId,
                                 ),
-                          onOpenSnippets: () => _openMobilePluginBottomSheet(
-                            SnippetsPlugin.pluginId,
-                          ),
-                          onOpenPortForward: () => _openMobilePluginBottomSheet(
-                            PortForwardPlugin.pluginId,
-                          ),
                         );
                       },
                     ),
 
-                  // 底部状态栏（手机端弹出软键盘时自动收起，日常完整避让手势小白条）
+                  // 底部栏：手机模式采用 iOS 原生液态玻璃胶囊菜单切换各功能；桌面/平板显示状态栏
                   if (showBottomStatusBar)
                     RepaintBoundary(
-                      child: _buildBottomPluginStatusBar(
-                        pluginContext,
-                        layoutMode,
-                      ),
+                      child: layoutMode == AdaptiveLayoutMode.compact
+                          ? MobileLiquidGlassBottomBar(
+                              currentSection: _mobileNavSection,
+                              openTabCount: _workspace.tabs.length,
+                              accentColor: _colorPalette.accentColor,
+                              onSelectSection: (section) {
+                                setState(() => _mobileNavSection = section);
+                              },
+                              onOpenVerticalTabs: _openMobileVerticalTabsSheet,
+                            )
+                          : _buildBottomPluginStatusBar(
+                              pluginContext,
+                              layoutMode,
+                            ),
                     ),
                 ],
               ),
@@ -1972,192 +2200,74 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
           ),
         ),
       ),
-      child: Row(
-        children: [
-          if (isCompact)
-            Builder(
-              builder: (ctx) => SizedBox(
-                width: 38,
-                height: 38,
-                child: IconButton(
-                  tooltip: '服务器列表',
-                  padding: EdgeInsets.zero,
-                  icon: const Icon(
-                    Icons.menu_rounded,
-                    size: 22,
-                    color: TxColors.iconDefault,
-                  ),
-                  onPressed: () => Scaffold.of(ctx).openDrawer(),
-                ),
-              ),
-            )
-          else if (layoutMode == AdaptiveLayoutMode.expanded)
-            _topToolbarAction(
-              tooltip: '显示/隐藏服务器栏',
-              icon: _leftSidebarCollapsed
-                  ? Icons.menu_open_rounded
-                  : Icons.view_sidebar_outlined,
-              highlighted: !_leftSidebarCollapsed,
-              onPressed: () {
-                setState(
-                  () => _leftSidebarCollapsed = !_leftSidebarCollapsed,
-                );
-                _persistUiPreferences();
-              },
-            ),
-
-          const SizedBox(width: 4),
-
-          // 手机端在已有会话标签时自动隐藏品牌文字以腾出标签宽度；无标签或平板/PC 常驻显示
-          if (!isCompact || _workspace.tabs.isEmpty) ...[
-            Row(
-              mainAxisSize: MainAxisSize.min,
+      child: isCompact
+          ? _buildCompactTopHeaderRow()
+          : Row(
               children: [
-                Container(
-                  width: 24,
-                  height: 24,
-                  decoration: BoxDecoration(
-                    color: TxColors.bgElevated,
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: TxColors.borderDefault),
-                  ),
-                  alignment: Alignment.center,
-                  child: const Icon(
-                    Icons.terminal_rounded,
-                    size: 15,
-                    color: TxColors.textPrimary,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                const Text(
-                  'TermX',
-                  style: TextStyle(
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: -0.2,
-                    color: TxColors.textPrimary,
-                  ),
-                ),
-              ],
-            ),
-            Container(
-              width: 1,
-              height: 18,
-              margin: EdgeInsets.symmetric(horizontal: isCompact ? 8 : 10),
-              color: TxColors.borderSubtle,
-            ),
-          ],
-
-          Expanded(child: _buildSessionTabs()),
-
-          const SizedBox(width: 4),
-          if (isCompact) ...[
-            SizedBox(
-              width: 38,
-              height: 38,
-              child: IconButton(
-                tooltip: '新建连接',
-                padding: EdgeInsets.zero,
-                icon: const Icon(
-                  Icons.add_rounded,
-                  size: 22,
-                  color: TxColors.iconDefault,
-                ),
-                onPressed: _newLocalTab,
-              ),
-            ),
-            SizedBox(
-              width: 38,
-              height: 38,
-              child: PopupMenuButton<String>(
-                tooltip: '更多设置',
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 188),
-                icon: const Icon(
-                  Icons.more_vert_rounded,
-                  size: 21,
-                  color: TxColors.iconDefault,
-                ),
-                onSelected: (action) {
-                  switch (action) {
-                    case 'new_ssh':
-                      if (_hostsLoaded) _addHost();
-                    case 'palette_cursor':
-                      _openMobilePaletteAndCursorSheet();
-                    case 'vault':
-                      showKeychainVaultDialog(
-                        context: context,
-                        vaultService: _vaultService,
-                        hosts: _hosts,
+                if (layoutMode == AdaptiveLayoutMode.expanded)
+                  _topToolbarAction(
+                    tooltip: '显示/隐藏服务器栏',
+                    icon: _leftSidebarCollapsed
+                        ? Icons.menu_open_rounded
+                        : Icons.view_sidebar_outlined,
+                    highlighted: !_leftSidebarCollapsed,
+                    onPressed: () {
+                      setState(
+                        () => _leftSidebarCollapsed = !_leftSidebarCollapsed,
                       );
-                    case 'plugins':
-                      _openPluginManagerSheetOrDialog(pluginContext);
-                    case 'shortcuts':
-                      _openShortcutSettings();
-                  }
-                },
-                itemBuilder: (ctx) => const [
-                  PopupMenuItem(
-                    value: 'new_ssh',
-                    child: Row(
-                      children: [
-                        Icon(Icons.dns_outlined, size: 18),
-                        SizedBox(width: 10),
-                        Text('新建 SSH 主机'),
-                      ],
-                    ),
+                      _persistUiPreferences();
+                    },
                   ),
-                  PopupMenuItem(
-                    value: 'palette_cursor',
-                    child: Row(
-                      children: [
-                        Icon(Icons.contrast_rounded, size: 18),
-                        SizedBox(width: 10),
-                        Text('终端配色与光标'),
-                      ],
+
+                const SizedBox(width: 4),
+
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 24,
+                      height: 24,
+                      decoration: BoxDecoration(
+                        color: TxColors.bgElevated,
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: TxColors.borderDefault),
+                      ),
+                      alignment: Alignment.center,
+                      child: const Icon(
+                        Icons.terminal_rounded,
+                        size: 15,
+                        color: TxColors.textPrimary,
+                      ),
                     ),
-                  ),
-                  PopupMenuItem(
-                    value: 'vault',
-                    child: Row(
-                      children: [
-                        Icon(Icons.key_outlined, size: 18),
-                        SizedBox(width: 10),
-                        Text('安全凭据管理'),
-                      ],
+                    const SizedBox(width: 8),
+                    const Text(
+                      'TermX',
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: -0.2,
+                        color: TxColors.textPrimary,
+                      ),
                     ),
-                  ),
-                  PopupMenuItem(
-                    value: 'plugins',
-                    child: Row(
-                      children: [
-                        Icon(Icons.widgets_outlined, size: 18),
-                        SizedBox(width: 10),
-                        Text('扩展管理'),
-                      ],
-                    ),
-                  ),
-                  PopupMenuItem(
-                    value: 'shortcuts',
-                    child: Row(
-                      children: [
-                        Icon(Icons.keyboard_alt_outlined, size: 18),
-                        SizedBox(width: 10),
-                        Text('外接键盘快捷键'),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ] else ...[
-            _topToolbarAction(
-              tooltip:
-                  '新建本地终端    ${_shortcutConfig.chordFor(ShortcutAction.newTab).displayLabel}',
-              icon: Icons.add_rounded,
-              label: showDesktopLabels ? '新建' : null,
-              onPressed: _newLocalTab,
-            ),
+                  ],
+                ),
+                Container(
+                  width: 1,
+                  height: 18,
+                  margin: const EdgeInsets.symmetric(horizontal: 10),
+                  color: TxColors.borderSubtle,
+                ),
+
+                Expanded(child: _buildSessionTabs()),
+
+                const SizedBox(width: 4),
+                _topToolbarAction(
+                  tooltip:
+                      '新建本地终端    ${_shortcutConfig.chordFor(ShortcutAction.newTab).displayLabel}',
+                  icon: Icons.add_rounded,
+                  label: showDesktopLabels ? '新建' : null,
+                  onPressed: _newLocalTab,
+                ),
 
             Container(
               width: 1,
@@ -2340,8 +2450,170 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
               },
             ),
           ],
-        ],
-      ),
+        ),
+    );
+  }
+
+  /// 手机端专属：Termius 风格极简顶部标题栏（左：垂直标签切换器；中：当前活动会话胶囊；右：重连与新建）
+  Widget _buildCompactTopHeaderRow() {
+    final activeTab = _workspace.activeTab;
+    final activePane = activeTab != null
+        ? _workspace.panes[activeTab.focusedPaneId]
+        : null;
+    final tabCount = _workspace.tabs.length;
+
+    return Row(
+      children: [
+        // 1. 垂直标签页切换按钮（带会话数量角标）
+        Tooltip(
+          message: '垂直标签页 ($tabCount)',
+          child: InkWell(
+            key: const ValueKey('mobile_vertical_tabs_btn'),
+            borderRadius: BorderRadius.circular(8),
+            onTap: _openMobileVerticalTabsSheet,
+            child: Container(
+              height: 34,
+              padding: const EdgeInsets.symmetric(horizontal: 9),
+              decoration: BoxDecoration(
+                color: TxColors.bgElevated,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: TxColors.borderSubtle),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.layers_rounded,
+                    size: 16,
+                    color: TxColors.iconDefault,
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    '$tabCount',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      fontFamily: TxColors.monoFamily,
+                      color: TxColors.textPrimary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+
+        // 2. 中间：当前活动会话胶囊（点击展开垂直标签页）
+        Expanded(
+          child: activeTab != null && activePane != null
+              ? InkWell(
+                  key: const ValueKey('mobile_active_session_pill'),
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: _openMobileVerticalTabsSheet,
+                  child: Container(
+                    height: 34,
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    decoration: BoxDecoration(
+                      color: TxColors.bgElevated.withValues(alpha: 0.72),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: TxColors.borderSubtle),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        SessionOsStatusBadge(
+                          session: activePane.session,
+                          size: 14,
+                        ),
+                        const SizedBox(width: 7),
+                        Flexible(
+                          child: Text(
+                            _workspace.title(activeTab),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: TxColors.textPrimary,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        const Icon(
+                          Icons.keyboard_arrow_down_rounded,
+                          size: 16,
+                          color: TxColors.textMuted,
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Container(
+                      width: 22,
+                      height: 22,
+                      decoration: BoxDecoration(
+                        color: TxColors.bgElevated,
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: TxColors.borderDefault),
+                      ),
+                      alignment: Alignment.center,
+                      child: const Icon(
+                        Icons.terminal_rounded,
+                        size: 14,
+                        color: TxColors.textPrimary,
+                      ),
+                    ),
+                    const SizedBox(width: 7),
+                    const Text(
+                      'TermX',
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w600,
+                        color: TxColors.textPrimary,
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+        const SizedBox(width: 6),
+
+        // 3. 右侧：仅保留极简「重连」与「新建」按钮
+        if (activeTab != null)
+          SizedBox(
+            width: 34,
+            height: 34,
+            child: IconButton(
+              key: const ValueKey('mobile_top_reconnect_btn'),
+              tooltip: '重新连接当前终端',
+              padding: EdgeInsets.zero,
+              icon: const Icon(
+                Icons.refresh_rounded,
+                size: 19,
+                color: TxColors.iconDefault,
+              ),
+              onPressed: () =>
+                  _restartPane(activeTab, activeTab.focusedPaneId),
+            ),
+          ),
+        SizedBox(
+          width: 34,
+          height: 34,
+          child: IconButton(
+            tooltip: '新建连接',
+            padding: EdgeInsets.zero,
+            icon: const Icon(
+              Icons.add_rounded,
+              size: 21,
+              color: TxColors.iconDefault,
+            ),
+            onPressed: _newLocalTab,
+          ),
+        ),
+      ],
     );
   }
 
@@ -2640,7 +2912,8 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
       hostColor: hostColor,
       onTap: () {
         _openNewSession(h);
-        if (layoutMode == AdaptiveLayoutMode.compact) {
+        if (layoutMode == AdaptiveLayoutMode.compact &&
+            Scaffold.maybeOf(context)?.isDrawerOpen == true) {
           Navigator.of(context).maybePop();
         }
       },
@@ -3200,6 +3473,7 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
                     ? PaneLeaf(tab.focusedPaneId)
                     : tab.root,
                 pluginContext,
+                isCompact: compact,
               ),
             ),
           ],
@@ -3236,14 +3510,25 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
   Widget _buildPaneLayout(
     TerminalTab tab,
     PaneLayout layout,
-    PluginContext pluginContext,
-  ) {
+    PluginContext pluginContext, {
+    bool isCompact = false,
+  }) {
     if (layout is PaneSplit) {
       return ResizablePaneSplit(
         key: ObjectKey(layout),
         split: layout,
-        first: _buildPaneLayout(tab, layout.first, pluginContext),
-        second: _buildPaneLayout(tab, layout.second, pluginContext),
+        first: _buildPaneLayout(
+          tab,
+          layout.first,
+          pluginContext,
+          isCompact: isCompact,
+        ),
+        second: _buildPaneLayout(
+          tab,
+          layout.second,
+          pluginContext,
+          isCompact: isCompact,
+        ),
         onRatioChanged: _persistUiPreferences,
       );
     }
@@ -3295,6 +3580,7 @@ class _TermXWorkbenchState extends State<TermXWorkbench>
       onCursorTypeChanged: _setCursorType,
       onFontSizeChanged: _persistUiPreferences,
       virtualModifierController: _virtualModifierController,
+      hideHeaderBar: isCompact && !isMultiPane,
     );
   }
 

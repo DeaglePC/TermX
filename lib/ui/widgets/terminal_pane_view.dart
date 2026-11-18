@@ -49,6 +49,7 @@ class TerminalPaneView extends StatefulWidget {
     this.onCursorTypeChanged,
     this.onFontSizeChanged,
     this.virtualModifierController,
+    this.hideHeaderBar = false,
   });
   final TerminalPane pane;
   final String title;
@@ -73,6 +74,7 @@ class TerminalPaneView extends StatefulWidget {
   final ValueChanged<TerminalCursorType>? onCursorTypeChanged;
   final VoidCallback? onFontSizeChanged;
   final VirtualModifierController? virtualModifierController;
+  final bool hideHeaderBar;
 
   @override
   State<TerminalPaneView> createState() => TerminalPaneViewState();
@@ -848,8 +850,9 @@ class TerminalPaneViewState extends State<TerminalPaneView> {
           children: [
             Column(
               children: [
-                Container(
-                  height: 34,
+                if (!widget.hideHeaderBar)
+                  Container(
+                    height: 34,
                   decoration: BoxDecoration(
                     color: widget.active
                         ? const Color(0xFF15181F)

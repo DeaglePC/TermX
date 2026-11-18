@@ -1,3 +1,5 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -244,12 +246,12 @@ class VirtualModifierController extends ChangeNotifier {
   }
 }
 
-/// 手机端 (iOS / Android) 专属虚拟扩展键盘栏 + CTRL/ALT 组合键快捷排 + 弱网本地草稿箱
+/// 手机端 (iOS / Android) Termius 极简风格单行虚拟扩展键盘栏 + CTRL 展开组合键 + 本地草稿箱
 class MobileAccessoryKeyboardBar extends StatefulWidget {
   final void Function(String rawSequence) onSendRaw;
-  final VoidCallback onOpenSnippets;
-  final VoidCallback onOpenSftp;
-  final VoidCallback onOpenMonitor;
+  final VoidCallback? onOpenSnippets;
+  final VoidCallback? onOpenSftp;
+  final VoidCallback? onOpenMonitor;
   final VoidCallback? onOpenBeautifier;
   final VoidCallback? onToggleBeautifierMode;
   final int beautifierCardCount;
@@ -264,9 +266,9 @@ class MobileAccessoryKeyboardBar extends StatefulWidget {
   const MobileAccessoryKeyboardBar({
     super.key,
     required this.onSendRaw,
-    required this.onOpenSnippets,
-    required this.onOpenSftp,
-    required this.onOpenMonitor,
+    this.onOpenSnippets,
+    this.onOpenSftp,
+    this.onOpenMonitor,
     this.onOpenBeautifier,
     this.onToggleBeautifierMode,
     this.beautifierCardCount = 0,
@@ -320,7 +322,8 @@ class _MobileAccessoryKeyboardBarState
   ];
 
   VirtualModifierController get _mod =>
-      widget.modifierController ?? (_internalModCtrl ??= VirtualModifierController());
+      widget.modifierController ??
+      (_internalModCtrl ??= VirtualModifierController());
 
   @override
   void initState() {
@@ -378,9 +381,9 @@ class _MobileAccessoryKeyboardBarState
 
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF13141C),
+        color: const Color(0xFF11131A).withValues(alpha: 0.94),
         border: Border(
-          top: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
+          top: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
         ),
       ),
       child: SafeArea(
@@ -394,7 +397,7 @@ class _MobileAccessoryKeyboardBarState
               Container(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                color: const Color(0xFF1F2335),
+                color: const Color(0xFF1A1D29),
                 child: Row(
                   children: [
                     Expanded(
@@ -406,7 +409,7 @@ class _MobileAccessoryKeyboardBarState
                           fontSize: 13,
                         ),
                         decoration: const InputDecoration(
-                          hintText: '在本地编辑完整命令后一键下发 (防弱网抖动)...',
+                          hintText: '在本地编辑完整命令后一键下发...',
                           isDense: true,
                           border: InputBorder.none,
                         ),
@@ -436,15 +439,15 @@ class _MobileAccessoryKeyboardBarState
                 ),
               ),
 
-            // 当 CTRL 激活时，自动展开高频 CTRL+字母 组合键栏（也可直接在系统软键盘输入字母触发）
+            // 当 CTRL 激活时，自动展开高频 CTRL+字母 组合键栏
             if (ctrlActive)
               Container(
-                height: 38,
+                height: 36,
                 decoration: BoxDecoration(
-                  color: const Color(0xFF1A1D2B),
+                  color: const Color(0xFF171A26),
                   border: Border(
                     bottom: BorderSide(
-                      color: const Color(0xFFBB9AF7).withValues(alpha: 0.25),
+                      color: const Color(0xFFBB9AF7).withValues(alpha: 0.22),
                     ),
                   ),
                 ),
@@ -478,16 +481,23 @@ class _MobileAccessoryKeyboardBarState
                 ),
               ),
 
-            // 第一层：核心控制键与方向键
+            // Termius 极简风格：仅保留单行核心终端按键栏（各类功能面板交由底部 iOS 液态玻璃菜单切换）
             SizedBox(
-              height: 40,
+              height: 38,
               child: ListView(
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
+                  horizontal: 8,
                   vertical: 4,
                 ),
                 children: [
+                  if (widget.onReconnect != null && widget.isDisconnected)
+                    _buildActionChip(
+                      icon: Icons.refresh_rounded,
+                      label: '重新连接',
+                      active: true,
+                      onTap: widget.onReconnect!,
+                    ),
                   _buildKeyButton('ESC', '\x1b', isAccent: true),
                   _buildKeyButton('TAB', '\t'),
                   _buildModifierButton(
@@ -520,96 +530,79 @@ class _MobileAccessoryKeyboardBarState
                       widget.onRequestTerminalFocus?.call();
                     },
                   ),
-                  _buildKeyButton('↑', '\x1b[A', isArrow: true),
-                  _buildKeyButton('↓', '\x1b[B', isArrow: true),
                   _buildKeyButton('←', '\x1b[D', isArrow: true),
+                  _buildKeyButton('↓', '\x1b[B', isArrow: true),
+                  _buildKeyButton('↑', '\x1b[A', isArrow: true),
                   _buildKeyButton('→', '\x1b[C', isArrow: true),
+                  _buildKeyButton('-', '-'),
+                  _buildKeyButton('/', '/'),
+                  _buildKeyButton('|', '|'),
+                  _buildKeyButton('~', '~'),
                   _buildKeyButton('^C', '\x03', isDanger: true),
-                  _buildKeyButton('^L', '\x0c'),
                   _buildKeyButton('ENTER', '\r', isAccent: true),
-                ],
-              ),
-            ),
-
-            // 第二层：高频管道符号 + 移动端一键插件抽屉入口
-            SizedBox(
-              height: 38,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.fromLTRB(10, 0, 10, 5),
-                children: [
-                  if (widget.onReconnect != null && widget.isDisconnected)
-                    _buildActionChip(
-                      icon: Icons.refresh_rounded,
-                      label: '重新连接',
-                      active: true,
-                      onTap: widget.onReconnect!,
-                    ),
-                  _buildActionChip(
-                    icon: Icons.edit_road_rounded,
-                    label: _composerVisible ? '收起草稿' : '命令草稿箱',
-                    active: _composerVisible,
-                    onTap: () =>
-                        setState(() => _composerVisible = !_composerVisible),
-                  ),
-                  if (widget.onOpenBeautifier != null)
-                    _buildActionChip(
-                      icon: Icons.auto_awesome_outlined,
-                      label: widget.beautifierCardCount > 0
-                          ? '输出美化 (${widget.beautifierCardCount})'
-                          : '输出美化',
-                      active: widget.beautifierShowingCard,
-                      onTap: widget.onOpenBeautifier!,
-                    ),
                   if (widget.beautifierCardCount > 0 &&
                       widget.onToggleBeautifierMode != null)
                     _buildActionChip(
                       icon: widget.beautifierShowingCard
                           ? Icons.terminal_rounded
-                          : Icons.visibility_outlined,
-                      label: widget.beautifierShowingCard ? '切原文' : '显卡片',
+                          : Icons.auto_awesome_outlined,
+                      label: widget.beautifierShowingCard ? '原文' : '卡片',
                       active: widget.beautifierShowingCard,
                       onTap: widget.onToggleBeautifierMode!,
                     ),
-                  _buildActionChip(
-                    icon: Icons.folder_open_rounded,
-                    label: 'SFTP互传',
-                    onTap: widget.onOpenSftp,
+                  _buildIconKeyButton(
+                    tooltip: _composerVisible ? '收起草稿箱' : '命令草稿箱',
+                    icon: Icons.edit_note_rounded,
+                    active: _composerVisible,
+                    onTap: () =>
+                        setState(() => _composerVisible = !_composerVisible),
                   ),
-                  _buildActionChip(
-                    icon: Icons.monitor_heart_outlined,
-                    label: '负载监控',
-                    onTap: widget.onOpenMonitor,
-                  ),
-                  _buildActionChip(
-                    icon: Icons.bolt_rounded,
-                    label: '快捷片段',
-                    onTap: widget.onOpenSnippets,
-                  ),
-                  if (widget.onOpenPortForward != null)
-                    _buildActionChip(
-                      icon: Icons.alt_route_rounded,
-                      label: '端口隧道',
-                      onTap: widget.onOpenPortForward!,
-                    ),
-                  if (widget.onReconnect != null && !widget.isDisconnected)
-                    _buildActionChip(
-                      icon: Icons.refresh_rounded,
-                      label: '重连',
-                      onTap: widget.onReconnect!,
-                    ),
-                  _buildKeyButton('|', '|'),
-                  _buildKeyButton('/', '/'),
-                  _buildKeyButton('-', '-'),
-                  _buildKeyButton('~', '~'),
-                  _buildKeyButton(':', ':'),
-                  _buildKeyButton('"', '"'),
-                  _buildKeyButton('HOME', '\x1b[H'),
-                  _buildKeyButton('END', '\x1b[F'),
                 ],
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildIconKeyButton({
+    required String tooltip,
+    required IconData icon,
+    required VoidCallback onTap,
+    bool active = false,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 5),
+      child: Tooltip(
+        message: tooltip,
+        child: Material(
+          color: active
+              ? const Color(0xFF7AA2F7).withValues(alpha: 0.24)
+              : const Color(0xFF1D2030),
+          borderRadius: BorderRadius.circular(6),
+          child: InkWell(
+            canRequestFocus: false,
+            borderRadius: BorderRadius.circular(6),
+            onTap: onTap,
+            child: Container(
+              width: 34,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(
+                  color: active
+                      ? const Color(0xFF7AA2F7).withValues(alpha: 0.5)
+                      : Colors.white.withValues(alpha: 0.08),
+                ),
+              ),
+              child: Icon(
+                icon,
+                size: 15,
+                color: active ? const Color(0xFF7DCFFF) : Colors.white70,
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -675,8 +668,8 @@ class _MobileAccessoryKeyboardBarState
         : isAccent
             ? const Color(0xFF7AA2F7).withValues(alpha: 0.22)
             : isArrow
-                ? const Color(0xFF282D46)
-                : const Color(0xFF1F2335);
+                ? const Color(0xFF25293E)
+                : const Color(0xFF1D2030);
 
     final textColor = isDanger
         ? const Color(0xFFF7768E)
@@ -694,12 +687,12 @@ class _MobileAccessoryKeyboardBarState
           borderRadius: BorderRadius.circular(6),
           onTap: () => _triggerKey(label, sequence),
           child: Container(
-            constraints: const BoxConstraints(minWidth: 38),
-            padding: const EdgeInsets.symmetric(horizontal: 9),
+            constraints: const BoxConstraints(minWidth: 36),
+            padding: const EdgeInsets.symmetric(horizontal: 8),
             alignment: Alignment.center,
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+              border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
             ),
             child: Text(
               label,
@@ -726,7 +719,7 @@ class _MobileAccessoryKeyboardBarState
     return Padding(
       padding: const EdgeInsets.only(right: 5),
       child: Material(
-        color: active ? const Color(0xFFBB9AF7) : const Color(0xFF1F2335),
+        color: active ? const Color(0xFFBB9AF7) : const Color(0xFF1D2030),
         borderRadius: BorderRadius.circular(6),
         child: InkWell(
           key: key,
@@ -735,9 +728,17 @@ class _MobileAccessoryKeyboardBarState
           onTap: onTap,
           onLongPress: onLongPress,
           child: Container(
-            constraints: const BoxConstraints(minWidth: 44),
-            padding: const EdgeInsets.symmetric(horizontal: 9),
+            constraints: const BoxConstraints(minWidth: 42),
+            padding: const EdgeInsets.symmetric(horizontal: 8),
             alignment: Alignment.center,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(
+                color: active
+                    ? Colors.transparent
+                    : Colors.white.withValues(alpha: 0.07),
+              ),
+            ),
             child: Text(
               label,
               style: TextStyle(
@@ -790,6 +791,557 @@ class _MobileAccessoryKeyboardBarState
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 手机模式底部 iOS 液态玻璃导航分区
+enum MobileNavSection {
+  terminal('终端', Icons.terminal_rounded),
+  hosts('主机', Icons.dns_rounded),
+  sftp('SFTP', Icons.folder_rounded),
+  monitor('监控', Icons.monitor_heart_rounded),
+  tools('工具', Icons.grid_view_rounded);
+
+  final String label;
+  final IconData icon;
+  const MobileNavSection(this.label, this.icon);
+}
+
+/// iOS 原生液态玻璃 (Liquid Glass) 底部悬浮胶囊菜单栏
+/// 采用实时高斯背景模糊 (BackdropFilter) + 顶部高光折射边缘 + 悬浮水滴透镜高亮胶囊，
+/// 模仿 Termius + iOS 液态玻璃质感切换各个核心功能区。
+class MobileLiquidGlassBottomBar extends StatelessWidget {
+  final MobileNavSection currentSection;
+  final ValueChanged<MobileNavSection> onSelectSection;
+  final VoidCallback? onOpenVerticalTabs;
+  final int openTabCount;
+  final Color accentColor;
+
+  const MobileLiquidGlassBottomBar({
+    super.key,
+    required this.currentSection,
+    required this.onSelectSection,
+    this.onOpenVerticalTabs,
+    this.openTabCount = 0,
+    this.accentColor = const Color(0xFF7AA2F7),
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    return Container(
+      key: const ValueKey('mobile_liquid_glass_bottom_bar'),
+      color: Colors.transparent,
+      padding: EdgeInsets.fromLTRB(
+        14,
+        6,
+        14,
+        bottomInset > 0 ? bottomInset + 4 : 10,
+      ),
+      child: Container(
+        height: 58,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(999),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.48),
+              blurRadius: 26,
+              spreadRadius: -2,
+              offset: const Offset(0, 10),
+            ),
+            BoxShadow(
+              color: accentColor.withValues(alpha: 0.08),
+              blurRadius: 18,
+              spreadRadius: 0,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(999),
+          child: BackdropFilter(
+            filter: ui.ImageFilter.blur(sigmaX: 28, sigmaY: 28),
+            child: CustomPaint(
+              foregroundPainter: _LiquidGlassRimPainter(
+                accentColor: accentColor,
+              ),
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(999),
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.white.withValues(alpha: 0.14),
+                      const Color(0xFF1A1E2B).withValues(alpha: 0.76),
+                      const Color(0xFF10131C).withValues(alpha: 0.84),
+                    ],
+                    stops: const [0.0, 0.35, 1.0],
+                  ),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 5,
+                  ),
+                  child: Row(
+                    children: [
+                      for (final section in MobileNavSection.values)
+                        Expanded(
+                          child: _buildGlassTabItem(section),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGlassTabItem(MobileNavSection section) {
+    final selected = currentSection == section;
+    final isTerminal = section == MobileNavSection.terminal;
+
+    return GestureDetector(
+      key: ValueKey('liquid_nav_${section.name}'),
+      behavior: HitTestBehavior.opaque,
+      onTap: () {
+        HapticFeedback.selectionClick();
+        if (isTerminal && selected && onOpenVerticalTabs != null) {
+          onOpenVerticalTabs!();
+        } else {
+          onSelectSection(section);
+        }
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(999),
+          gradient: selected
+              ? LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    Colors.white.withValues(alpha: 0.24),
+                    accentColor.withValues(alpha: 0.22),
+                    Colors.white.withValues(alpha: 0.08),
+                  ],
+                )
+              : null,
+          border: selected
+              ? Border.all(
+                  color: Colors.white.withValues(alpha: 0.32),
+                  width: 0.9,
+                )
+              : null,
+          boxShadow: selected
+              ? [
+                  BoxShadow(
+                    color: accentColor.withValues(alpha: 0.22),
+                    blurRadius: 12,
+                    spreadRadius: -2,
+                  ),
+                ]
+              : null,
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Icon(
+                  section.icon,
+                  size: 19,
+                  color: selected
+                      ? Colors.white
+                      : Colors.white.withValues(alpha: 0.62),
+                ),
+                if (isTerminal && openTabCount > 0)
+                  Positioned(
+                    right: -9,
+                    top: -4,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 4.5,
+                        vertical: 0.5,
+                      ),
+                      decoration: BoxDecoration(
+                        color: selected
+                            ? accentColor
+                            : const Color(0xFF2B3147),
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(
+                          color: Colors.white.withValues(alpha: 0.28),
+                          width: 0.7,
+                        ),
+                      ),
+                      child: Text(
+                        '$openTabCount',
+                        style: TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.w700,
+                          color: selected
+                              ? const Color(0xFF0E1017)
+                              : Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 2),
+            Text(
+              section.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 10.5,
+                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                letterSpacing: 0.1,
+                color: selected
+                    ? Colors.white
+                    : Colors.white.withValues(alpha: 0.64),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 绘制 iOS 原生液态玻璃胶囊边缘的顶部高光折射环 (Specular Rim Highlight)
+class _LiquidGlassRimPainter extends CustomPainter {
+  final Color accentColor;
+
+  const _LiquidGlassRimPainter({required this.accentColor});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    final rrect = RRect.fromRectAndRadius(
+      rect.deflate(0.5),
+      const Radius.circular(999),
+    );
+    final rimPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.1
+      ..shader = LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [
+          Colors.white.withValues(alpha: 0.42),
+          Colors.white.withValues(alpha: 0.14),
+          accentColor.withValues(alpha: 0.22),
+          Colors.white.withValues(alpha: 0.24),
+        ],
+        stops: const [0.0, 0.35, 0.7, 1.0],
+      ).createShader(rect);
+    canvas.drawRRect(rrect, rimPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _LiquidGlassRimPainter oldDelegate) =>
+      oldDelegate.accentColor != accentColor;
+}
+
+/// 手机端垂直标签页条目视图模型
+class MobileVerticalTabEntry {
+  final String id;
+  final String title;
+  final String subtitle;
+  final Widget statusBadge;
+  final bool active;
+  final bool isDisconnected;
+  final int paneCount;
+  final Color? customColor;
+  final VoidCallback onSelect;
+  final VoidCallback onReconnect;
+  final VoidCallback onRename;
+  final VoidCallback onClose;
+
+  const MobileVerticalTabEntry({
+    required this.id,
+    required this.title,
+    required this.subtitle,
+    required this.statusBadge,
+    required this.active,
+    required this.isDisconnected,
+    this.paneCount = 1,
+    this.customColor,
+    required this.onSelect,
+    required this.onReconnect,
+    required this.onRename,
+    required this.onClose,
+  });
+}
+
+/// 手机端专属：垂直标签页抽屉/面板 (Vertical Tabs Sheet)
+/// 解决手机窄屏下水平标签栏拥挤难按的痛点，以全宽垂直卡片列表清晰呈现所有打开的终端会话。
+class MobileVerticalTabsSheet extends StatelessWidget {
+  final List<MobileVerticalTabEntry> entries;
+  final VoidCallback onNewSession;
+  final VoidCallback onBrowseHosts;
+  final void Function(int oldIndex, int newIndex)? onReorder;
+  final Color accentColor;
+
+  const MobileVerticalTabsSheet({
+    super.key,
+    required this.entries,
+    required this.onNewSession,
+    required this.onBrowseHosts,
+    this.onReorder,
+    this.accentColor = const Color(0xFF7AA2F7),
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      key: const ValueKey('mobile_vertical_tabs_sheet'),
+      decoration: BoxDecoration(
+        color: const Color(0xFF131620),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+        border: Border(
+          top: BorderSide(color: Colors.white.withValues(alpha: 0.16)),
+        ),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 38,
+              height: 4,
+              margin: const EdgeInsets.only(top: 10, bottom: 6),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.24),
+                borderRadius: BorderRadius.circular(999),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 12, 10),
+              child: Row(
+                children: [
+                  Icon(Icons.layers_rounded, size: 18, color: accentColor),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '垂直会话标签 (${entries.length})',
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                  TextButton.icon(
+                    style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    onPressed: onBrowseHosts,
+                    icon: const Icon(Icons.dns_outlined, size: 15),
+                    label: const Text('主机列表', style: TextStyle(fontSize: 12)),
+                  ),
+                  const SizedBox(width: 4),
+                  FilledButton.icon(
+                    key: const ValueKey('vertical_tabs_new_btn'),
+                    style: FilledButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                    ),
+                    onPressed: onNewSession,
+                    icon: const Icon(Icons.add_rounded, size: 15),
+                    label: const Text('新建', style: TextStyle(fontSize: 12)),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1, color: Color(0x1FFFFFFF)),
+            if (entries.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  vertical: 36,
+                  horizontal: 24,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.terminal_rounded,
+                      size: 32,
+                      color: Colors.white.withValues(alpha: 0.35),
+                    ),
+                    const SizedBox(height: 10),
+                    const Text(
+                      '暂无活动终端会话',
+                      style: TextStyle(fontSize: 13, color: Colors.white70),
+                    ),
+                  ],
+                ),
+              )
+            else
+              Flexible(
+                child: ReorderableListView.builder(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 16),
+                  itemCount: entries.length,
+                  onReorder: onReorder ?? (_, _) {},
+                  itemBuilder: (context, index) {
+                    final item = entries[index];
+                    final indicatorColor = item.customColor ?? accentColor;
+                    return Padding(
+                      key: ValueKey('vertical_tab_${item.id}'),
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Material(
+                        color: item.active
+                            ? indicatorColor.withValues(alpha: 0.16)
+                            : const Color(0xFF1B1F2E),
+                        borderRadius: BorderRadius.circular(12),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(12),
+                          onTap: item.onSelect,
+                          child: Container(
+                            padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: item.active
+                                    ? indicatorColor.withValues(alpha: 0.65)
+                                    : Colors.white.withValues(alpha: 0.08),
+                                width: item.active ? 1.3 : 1.0,
+                              ),
+                            ),
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 4,
+                                  height: 32,
+                                  decoration: BoxDecoration(
+                                    color: item.active
+                                        ? indicatorColor
+                                        : Colors.white.withValues(alpha: 0.14),
+                                    borderRadius: BorderRadius.circular(999),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                item.statusBadge,
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Flexible(
+                                            child: Text(
+                                              item.title,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                fontSize: 13.5,
+                                                fontWeight: item.active
+                                                    ? FontWeight.w700
+                                                    : FontWeight.w500,
+                                                color: Colors.white,
+                                              ),
+                                            ),
+                                          ),
+                                          if (item.paneCount > 1)
+                                            Container(
+                                              margin: const EdgeInsets.only(
+                                                left: 6,
+                                              ),
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 5,
+                                                    vertical: 1,
+                                                  ),
+                                              decoration: BoxDecoration(
+                                                color: Colors.white.withValues(
+                                                  alpha: 0.1,
+                                                ),
+                                                borderRadius:
+                                                    BorderRadius.circular(4),
+                                              ),
+                                              child: Text(
+                                                '${item.paneCount}分屏',
+                                                style: const TextStyle(
+                                                  fontSize: 10,
+                                                  color: Colors.white70,
+                                                ),
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        item.subtitle,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 11.5,
+                                          fontFamily: 'Consolas',
+                                          color: item.isDisconnected
+                                              ? const Color(0xFFF7768E)
+                                              : Colors.white54,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: '重新连接',
+                                  visualDensity: VisualDensity.compact,
+                                  icon: Icon(
+                                    Icons.refresh_rounded,
+                                    size: 18,
+                                    color: item.isDisconnected
+                                        ? accentColor
+                                        : Colors.white60,
+                                  ),
+                                  onPressed: item.onReconnect,
+                                ),
+                                IconButton(
+                                  tooltip: '重命名标签',
+                                  visualDensity: VisualDensity.compact,
+                                  icon: const Icon(
+                                    Icons.edit_outlined,
+                                    size: 17,
+                                    color: Colors.white60,
+                                  ),
+                                  onPressed: item.onRename,
+                                ),
+                                IconButton(
+                                  tooltip: '关闭此会话',
+                                  visualDensity: VisualDensity.compact,
+                                  icon: const Icon(
+                                    Icons.close_rounded,
+                                    size: 18,
+                                    color: Color(0xFFF7768E),
+                                  ),
+                                  onPressed: item.onClose,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+          ],
         ),
       ),
     );

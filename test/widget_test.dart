@@ -222,4 +222,44 @@ void main() {
       expect(mod.isCtrlActive, isFalse);
     },
   );
+
+  testWidgets(
+    'MobileLiquidGlassBottomBar and MobileVerticalTabsSheet switch sections and vertical tabs',
+    (WidgetTester tester) async {
+      var activeSection = MobileNavSection.terminal;
+      var openedVerticalTabs = 0;
+
+      await tester.pumpWidget(
+        StatefulBuilder(
+          builder: (context, setState) => Directionality(
+            textDirection: TextDirection.ltr,
+            child: MediaQuery(
+              data: const MediaQueryData(),
+              child: MobileLiquidGlassBottomBar(
+                currentSection: activeSection,
+                openTabCount: 2,
+                onSelectSection: (next) => setState(() => activeSection = next),
+                onOpenVerticalTabs: () => openedVerticalTabs++,
+              ),
+            ),
+          ),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('mobile_liquid_glass_bottom_bar')),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const ValueKey('liquid_nav_sftp')));
+      await tester.pump();
+      expect(activeSection, MobileNavSection.sftp);
+
+      await tester.tap(find.byKey(const ValueKey('liquid_nav_terminal')));
+      await tester.pump();
+      expect(activeSection, MobileNavSection.terminal);
+      await tester.tap(find.byKey(const ValueKey('liquid_nav_terminal')));
+      await tester.pump();
+      expect(openedVerticalTabs, 1);
+    },
+  );
 }
